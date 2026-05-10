@@ -1,7 +1,7 @@
 # langchain-runcycles — Middleware API Conformance Audit
 
 **Date:** 2026-05-10
-**Package:** `langchain-runcycles` v0.1.4
+**Package:** `langchain-runcycles` v0.1.5
 **LangChain target:** `langchain >= 1.0, < 2.0`, `langchain-core >= 1.0, < 2.0` (tested against `langchain==1.2.18`, `langchain-core==1.3.3`, `langgraph==1.1.10`)
 **Cycles SDK target:** `runcycles >= 0.4.1` (tested against `runcycles==0.4.1`, Python 3.10+)
 **Server audit:** Cycles protocol conformance is owned by [`cycles-client-python/AUDIT.md`](https://github.com/runcycles/cycles-client-python/blob/main/AUDIT.md). This document audits this package's contract with the LangChain agent middleware API only.
@@ -41,6 +41,8 @@ Compared the following across LangChain documentation and this package's source:
 |---|---|---|
 | `wrap_tool_call(self, request, handler)` | `langchain_runcycles/tool_gate.py:80` | Sync. Reads `request.tool_call['name'/'args'/'id']` and `request.state` (best-effort). Returns `ToolMessage` on deny, else `handler(request)`. |
 | `awrap_tool_call(self, request, handler)` | `langchain_runcycles/tool_gate.py:160` | Async. Awaits the SDK; awaits `handler(request)` if it returns a coroutine. |
+| `wrap_model_call(self, request, handler)` | `langchain_runcycles/model_gate.py:108` | Sync (v0.1.5+). Reads `request.state` (best-effort). Returns `ModelResponse(result=[AIMessage(...)])` on deny — agent terminates naturally because the AIMessage has no `tool_calls`. |
+| `awrap_model_call(self, request, handler)` | `langchain_runcycles/model_gate.py:188` | Async (v0.1.5+). Awaits the SDK; awaits `handler(request)` if it returns a coroutine. |
 | `before_model(self, state, runtime)` | `langchain_runcycles/fanout.py:81` | Sync. Decorated with `@hook_config(can_jump_to=["end"])`. Returns `None` when allowed, halt-dict otherwise. |
 | `abefore_model(self, state, runtime)` | `langchain_runcycles/fanout.py:113` | Async. Same contract. |
 
@@ -113,8 +115,9 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 
 ## Test coverage
 
-- 85 tests across:
+- 115 tests across:
   - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log, idempotency-key determinism, and v0.1.3 namespace static/callable/no-namespace/cross-run-collision)
+  - `tests/test_model_gate.py`, `tests/test_model_gate_async.py` — sync + async model-gate paths (v0.1.5+); decide allow/deny, reserve lifecycle, settlement raise/log, namespace
   - `tests/test_fanout.py`, `tests/test_fanout_async.py` — sync + async fan-out paths (including state-derived idempotency namespace)
   - `tests/test_examples.py` — import smoke for bundled examples
   - `tests/integration/test_live_agent.py` — `create_agent` construction with our middleware against a `FakeMessagesListChatModel`, verifying the AgentMiddleware contract is satisfied at runtime
@@ -126,7 +129,7 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 ## Known limitations (v0.1.x)
 
 - **Reserve mode commits at estimate**, not at actual usage. Tool-level cost instrumentation is left to the caller. A future revision may expose a `cost_fn` analogous to `stream_reservation`. Locked down by `tests/test_tool_gate.py::test_commit_called_with_configured_estimate`.
-- **No model-call middleware yet.** `CyclesModelGate` (using `wrap_model_call`) is planned for v0.2; v0.1.x covers tool-call gating and fan-out caps only. For LLM-spend tracking today, use `runcycles.stream_reservation` directly inside an LLM-spend handler.
+- **Model-call middleware ships at architecture parity, not production parity.** `CyclesModelGate` (v0.1.5+) implements `wrap_model_call` with the same three modes as `CyclesToolGate`, but commits at the configured `estimate` (no provider-specific token extraction yet) and uses a UUID per-call key (model requests don't carry a stable upstream id like `tool_call_id`). Provider extractors (OpenAI, Anthropic) and streaming integration are v0.2.0 scope. For precise actual-cost capture today, use the callback handler from `cycles-client-python` or wait for v0.2.0.
 - **Single tenant per middleware instance** unless you supply a `SubjectExtractor` callable. Per-call subject resolution is fully supported via the callable form; only the static-Subject convenience is single-tenant.
 - **Synthetic `tool_call_id` when missing.** A `ToolCallRequest` with no `id` field has its denial `ToolMessage` correlated via a fabricated `missing-<12-hex>` id, with a warning logged at `langchain_runcycles._internal`. Because the synthesis is fresh per call, the resulting idempotency key on this fallback path is *not* retry-stable. Conformant LangChain runtimes always supply `id`. Locked down by `tests/test_tool_gate.py::test_synthetic_tool_call_id_when_missing`.
 - **Fan-out gate rejects per-tool action mappings.** `CyclesFanOutGate` gates *model turns*, not tool calls; a per-tool-name `Mapping` for `action` is meaningless there and is rejected at construction with `TypeError`. Locked down by `tests/test_fanout.py::test_fanout_rejects_mapping_action`.

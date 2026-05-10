@@ -24,6 +24,7 @@ from langchain_runcycles._config import (
     TurnCounter,
 )
 from langchain_runcycles.fanout import CyclesFanOutGate
+from langchain_runcycles.model_gate import CyclesModelGate
 from langchain_runcycles.tool_gate import CyclesToolGate, Mode, SettlementErrorPolicy
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "ActionExtractor",
     "ActionMap",
     "CyclesFanOutGate",
+    "CyclesModelGate",
     "CyclesToolGate",
     "DenialFormatter",
     "IdempotencyNamespace",
