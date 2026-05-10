@@ -6,23 +6,25 @@
 
 # Cycles for LangChain — AI agent middleware for budget and action authority
 
-**LangChain middleware for pre-tool-call authorization, fan-out caps, and per-tenant budget enforcement in `create_agent` workflows.** Provider-neutral: works with any LangChain 1.x agent regardless of model provider, as long as actions flow through LangChain middleware/tool execution.
+**LangChain middleware for pre-execution budget authority over model calls, tool calls, and runaway agent loops in `create_agent` workflows.** Provider-neutral: works with any LangChain 1.x agent regardless of model provider, as long as actions flow through LangChain middleware/tool execution.
 
 Built on LangChain's [`AgentMiddleware`](https://docs.langchain.com/oss/python/langchain/middleware/) API:
 
+- **`wrap_model_call`** — pre-model-call authorization plus optional reserve/commit/release lifecycle around each LLM invocation (v0.1.5+)
 - **`wrap_tool_call`** — tool-call authorization plus optional reserve/commit/release lifecycle around each tool execution
 - **`before_model`** (with `@hook_config(can_jump_to=["end"])`) — fan-out caps and external policy halts before another model turn
 
-Model-call reservation via `wrap_model_call` is on the roadmap but **not implemented in v0.1.x**. For token-level streaming budget tracking today, use `runcycles.stream_reservation` directly inside an LLM-spend handler.
+Per-call actual-cost extraction (provider-specific token-usage parsing) and streaming integration are v0.2.0 scope. Until then, `CyclesModelGate` commits at the configured `estimate`; for precise per-call token capture today, use the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py).
 
 Install via `pip install langchain-runcycles`.
 
 ## What's in the box
 
+- **`CyclesModelGate`** (v0.1.5+) — runs before every model call. Authorizes via `client.decide()` and/or reserves budget. Returns a `ModelResponse` carrying the denial reason on deny so the agent terminates naturally.
 - **`CyclesToolGate`** — runs before every tool call. Authorizes via `client.decide()` and/or reserves budget via `client.create_reservation()`. Returns a `ToolMessage` on denial so the model can recover gracefully.
 - **`CyclesFanOutGate`** — runs before every model turn. Halts the agent (with `jump_to: "end"`) when a turn cap is hit or when an external policy says to stop. Useful for runaway-loop protection and per-tenant burst caps.
 
-Both work with sync or async LangChain agents and the sync (`CyclesClient`) or async (`AsyncCyclesClient`) Cycles client.
+All three work with sync or async LangChain agents and the sync (`CyclesClient`) or async (`AsyncCyclesClient`) Cycles client. Compose them in a single `middleware=[...]` list — typical order is `[CyclesFanOutGate, CyclesModelGate, CyclesToolGate]` so fan-out caps trigger before model spend before tool side effects.
 
 ## Installation
 
@@ -60,6 +62,24 @@ agent.invoke({"messages": [{"role": "user", "content": "Email alice."}]})
 If `client.decide()` denies the call, `send_email` is never invoked — the model receives a `ToolMessage` with the denial reason and can choose another path.
 
 ## Middleware
+
+### `CyclesModelGate` (v0.1.5+)
+
+Gates each model call. Same three modes as `CyclesToolGate`. On denial in `decide` mode, returns a `ModelResponse` whose `AIMessage` carries the denial reason — the agent terminates naturally because the AIMessage has no `tool_calls`.
+
+```python
+from langchain_runcycles import CyclesModelGate
+
+model_gate = CyclesModelGate(
+    client,
+    subject=Subject(tenant="acme", agent="researcher"),
+    action=Action(kind="llm.completion", name="gpt-4o"),
+    mode="reserve",
+    estimate=Amount(unit=Unit.USD_MICROCENTS, amount=2_000_000),  # $0.02 per call
+)
+```
+
+> v0.1.5 commits at the configured `estimate`. Per-call actual-cost extraction (token usage from provider response metadata) and streaming integration land in v0.2.0. For precise per-call token cost capture today, use the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py).
 
 ### `CyclesToolGate`
 

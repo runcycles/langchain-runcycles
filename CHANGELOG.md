@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-05-10
+
+Adds `CyclesModelGate` — pre-model-call authorization middleware — closing the third leg of the LangChain agent governance triad. Closes #10.
+
+`CyclesToolGate` already gated tool calls; `CyclesFanOutGate` already capped model turns; this release adds the third middleware so model calls themselves are intercepted via LangChain's `wrap_model_call` hook. With v0.1.5, the package can truthfully say it puts pre-execution authority in front of model calls, tool calls, and runaway agent loops.
+
+This is the **architecture milestone** — feature parity with `CyclesToolGate`. The **production milestone** (v0.2.0) will add provider-specific token-cost extractors, streaming integration, and a polished demo agent.
+
+### Added
+
+- **`CyclesModelGate`** — new `AgentMiddleware` subclass overriding `wrap_model_call` (sync) and `awrap_model_call` (async). On denial in `decide` mode, returns a `ModelResponse` whose `AIMessage` carries the denial reason (the agent terminates naturally because the AIMessage has no `tool_calls`).
+- **All three modes** (`decide` / `reserve` / `decide+reserve`) at parity with `CyclesToolGate`.
+- **`settlement_error_policy`** parity (default `"raise"`).
+- **`idempotency_namespace`** parity (static or callable, callable receives the `ModelRequest`).
+- **Public API exports**: `CyclesModelGate` re-exported from `langchain_runcycles`.
+
+### Changed
+
+- README "What's in the box" gains a third bullet for `CyclesModelGate`.
+- AUDIT.md hooks table gains `wrap_model_call` / `awrap_model_call` rows; "No model-call middleware yet" line removed from Known Limitations.
+- `docs/runcycles.mdx` gets a third middleware section + a 3-class composition example.
+
+### Known limitations (carried into v0.2.0)
+
+- **Commits at the configured `estimate`**, not actual token cost. Provider-specific token extraction (OpenAI, Anthropic) is v0.2.0 scope. For precise per-call actual-cost capture today, use the callback handler from `cycles-client-python` instead, or until v0.2.0 ships.
+- **No streaming integration**. For streaming LLM calls, use `runcycles.stream_reservation` directly. v0.2.0 may add streaming support inside `wrap_model_call`.
+- **Per-call key uses UUID fallback**. Model-call requests don't carry an upstream-stable id like `tool_call_id`, so each call gets a fresh UUID for the per-call slot. Namespacing (`model-decide-{namespace}-{32-hex}`) still scopes by run/workflow/tenant. v0.2.0 may extract a turn-id or message-hash for full retry-stability.
+
+### Test coverage
+
+- 28 new tests (115 total, was 87). Coverage 99.07% (gate 95%).
+- Sync + async parity for all paths; dedicated tests for the deny-path `ModelResponse` shape.
+
+### Backward compatibility
+
+Purely additive. v0.1.4 callers' code unchanged.
+
 ## [0.1.4] - 2026-05-10
 
 External review of v0.1.3 caught two real defects (stale README dep line, type alias narrower than the documented per-call opt-out) plus a docs-example issue (undefined helper in a runnable-looking snippet). All fixed; no functional change.
@@ -85,6 +122,7 @@ Initial public release. First-class LangChain agent middleware integration for C
 - Examples: `tenant_budget_agent.py` (tenant cap + risky-tool denial) and `multi_agent_fanout.py` (multi-agent / HITL flow).
 - `AUDIT.md` documenting LangChain middleware API conformance (hooks, ToolMessage shape, jump_to semantics, SDK methods consumed).
 
+[0.1.5]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.1...v0.1.2

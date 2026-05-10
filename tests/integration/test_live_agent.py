@@ -22,14 +22,15 @@ from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 from runcycles import Action, CyclesClient, CyclesConfig, CyclesResponse, Subject
 
-from langchain_runcycles import CyclesFanOutGate, CyclesToolGate
+from langchain_runcycles import CyclesFanOutGate, CyclesModelGate, CyclesToolGate
 
 
 def test_classes_satisfy_AgentMiddleware_protocol() -> None:
-    """Both middleware classes must inherit from AgentMiddleware so create_agent
-    accepts them in its `middleware=[...]` list."""
+    """All three middleware classes must inherit from AgentMiddleware so
+    create_agent accepts them in its `middleware=[...]` list."""
     assert issubclass(CyclesToolGate, AgentMiddleware)
     assert issubclass(CyclesFanOutGate, AgentMiddleware)
+    assert issubclass(CyclesModelGate, AgentMiddleware)
 
 
 def test_create_agent_accepts_tool_gate(sync_client: CyclesClient, subject: Any, action: Any) -> None:
@@ -84,6 +85,65 @@ def test_create_agent_accepts_both_middleware(
     tool_gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="decide")
 
     agent = create_agent(model=fake_model, tools=[noop], middleware=[fanout, tool_gate])
+    assert agent is not None
+
+
+def test_create_agent_accepts_model_gate(sync_client: CyclesClient, subject: Any) -> None:
+    """A real `create_agent` call with CyclesModelGate as middleware succeeds.
+    Verifies the wrap_model_call hook annotation is well-formed."""
+
+    @tool
+    def noop(x: str) -> str:
+        """A no-op tool."""
+        return x
+
+    fake_model = FakeMessagesListChatModel(responses=[AIMessage(content="ok")])
+    model_gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=Action(kind="llm.completion", name="fake-model"),
+        mode="decide",
+    )
+
+    agent = create_agent(model=fake_model, tools=[noop], middleware=[model_gate])
+    assert agent is not None
+
+
+def test_create_agent_accepts_full_triad(
+    sync_client: CyclesClient, subject: Any, action: Any
+) -> None:
+    """All three middleware classes composed in a single create_agent call.
+
+    This is the v0.1.5+ canonical shape: fan-out -> model -> tool ordering as
+    the recommended composition pattern. Verifies the three classes don't
+    interfere with each other's hook registration.
+    """
+
+    @tool
+    def noop(x: str) -> str:
+        """A no-op tool."""
+        return x
+
+    fake_model = FakeMessagesListChatModel(responses=[AIMessage(content="ok")])
+    fanout = CyclesFanOutGate(
+        5,
+        client=sync_client,
+        subject=Subject(tenant="acme"),
+        action=Action(kind="model.turn", name="research"),
+    )
+    model_gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=Action(kind="llm.completion", name="fake-model"),
+        mode="decide",
+    )
+    tool_gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="decide")
+
+    agent = create_agent(
+        model=fake_model,
+        tools=[noop],
+        middleware=[fanout, model_gate, tool_gate],
+    )
     assert agent is not None
 
 

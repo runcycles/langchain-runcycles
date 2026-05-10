@@ -120,3 +120,22 @@ class FakeToolCallRequest:
 @pytest.fixture
 def tool_call_request() -> FakeToolCallRequest:
     return FakeToolCallRequest()
+
+
+class FakeModelRequest:
+    """Minimal stand-in for a LangChain ModelRequest.
+
+    Real ``ModelRequest`` is a dataclass with required fields like ``model``
+    (a ``BaseChatModel``) and ``runtime`` (a ``Runtime``). The middleware only
+    reads ``request.state`` (via ``get_state``); other fields are passed
+    through to the handler unchanged. So a duck-typed object is enough for
+    middleware-level tests.
+    """
+
+    def __init__(self, state: dict[str, Any] | None = None):
+        self.state: dict[str, Any] = state if state is not None else {"messages": []}
+
+
+@pytest.fixture
+def model_request() -> FakeModelRequest:
+    return FakeModelRequest()
