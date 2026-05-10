@@ -179,3 +179,53 @@ async def test_async_settlement_log_swallows_commit_failure(
     )
     result = await gate.awrap_tool_call(tool_call_request, lambda r: "tool ran")
     assert result == "tool ran"
+
+
+@pytest.mark.asyncio
+async def test_async_idempotency_namespace_static(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Static namespace flows through awrap_tool_call too."""
+    captured: dict[str, str] = {}
+
+    async def capture_decide(req: Any) -> CyclesResponse:
+        captured["decide"] = req.idempotency_key
+        return CyclesResponse.success(200, {"decision": "ALLOW", "affected_scopes": []})
+
+    async_client.decide = capture_decide  # type: ignore[method-assign]
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="decide",
+        idempotency_namespace="run_async_1",
+    )
+    await gate.awrap_tool_call(tool_call_request, lambda r: "ok")
+    assert captured["decide"] == "decide-run_async_1-tc_1"
+
+
+@pytest.mark.asyncio
+async def test_async_idempotency_namespace_callable(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Callable namespace evaluated with the request on the async path."""
+    captured: dict[str, str] = {}
+
+    async def capture_decide(req: Any) -> CyclesResponse:
+        captured["decide"] = req.idempotency_key
+        return CyclesResponse.success(200, {"decision": "ALLOW", "affected_scopes": []})
+
+    async_client.decide = capture_decide  # type: ignore[method-assign]
+
+    def derive_namespace(request: Any) -> str:
+        return f"derived-{request.tool_call['name']}"
+
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="decide",
+        idempotency_namespace=derive_namespace,
+    )
+    await gate.awrap_tool_call(tool_call_request, lambda r: "ok")
+    assert captured["decide"] == "decide-derived-send_email-tc_1"

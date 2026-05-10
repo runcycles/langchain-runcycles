@@ -138,6 +138,40 @@ def derive(request):
     return Action(kind="tool.call", name=request.tool_call["name"])
 ```
 
+### Idempotency-key namespacing (v0.1.3+)
+
+Cycles idempotency keys default to `{prefix}-{tool_call_id}` — deterministic per tool call so retries land on the same reservation. If your runtime can reuse short tool-call ids across runs (`tc_1`, `tc_2`, ...), set `idempotency_namespace` on the middleware to scope keys by run / workflow / tenant. Keys then become `{prefix}-{namespace}-{tool_call_id}`.
+
+```python
+# Static — same namespace every call
+gate = CyclesToolGate(
+    client,
+    subject=Subject(tenant="acme"),
+    action=Action(kind="tool.call", name="send_email"),
+    idempotency_namespace="run_2026_05_10_abc",
+)
+
+# Callable — receives the LangChain ToolCallRequest. Pull the namespace from
+# wherever your runtime exposes the run id (a contextvar, your own middleware,
+# request metadata, etc.). The exact accessor depends on your LangChain version.
+def my_run_id(_request):
+    # In production: return your_runtime.current_run_id()
+    return current_run_id_contextvar.get("default")
+
+gate = CyclesToolGate(
+    client,
+    subject=Subject(tenant="acme"),
+    action=Action(kind="tool.call", name="send_email"),
+    idempotency_namespace=my_run_id,
+)
+```
+
+`CyclesFanOutGate.idempotency_namespace` is the same shape; the callable receives the agent `state` instead of the tool-call request. Without `idempotency_namespace`, keys keep the v0.1.2 shape exactly — no behavior change.
+
+**Per-call opt-out**: a callable that returns `None` (or empty string) for a particular call disables namespacing *for that call only*, producing the v0.1.2 shape `{prefix}-{tool_call_id}`. Useful when some calls should be globally scoped (admin / system tools) while others get run-scoped namespacing — branch on the request and return `None` from the unscoped path.
+
+**Errors in the callable propagate**: if your callable raises, the exception surfaces from `wrap_tool_call` / `before_model` to the agent. This is intentional — fail-fast on a misconfigured callable rather than silently producing keys with no namespace. Wrap in try/except inside the callable if you want a fallback.
+
 ### Denial messages
 
 `denial_message` accepts a format string (placeholders: `{reason}`, `{tool}`, `{decision}`) or a callable receiving the `CyclesResponse`:

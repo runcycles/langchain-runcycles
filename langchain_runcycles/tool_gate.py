@@ -32,7 +32,7 @@ from runcycles import (
     ReservationCreateRequest,
 )
 
-from langchain_runcycles._config import ActionConfig, DenialFormatter, SubjectConfig
+from langchain_runcycles._config import ActionConfig, DenialFormatter, IdempotencyNamespace, SubjectConfig
 from langchain_runcycles._internal import (
     _DEFAULT_ESTIMATE,
     coerce_tool_call_id,
@@ -70,6 +70,7 @@ class CyclesToolGate(AgentMiddleware):
         ttl_ms: int = 60_000,
         denial_message: DenialFormatter = "Tool call denied by Cycles policy: {reason}",
         settlement_error_policy: SettlementErrorPolicy = "raise",
+        idempotency_namespace: IdempotencyNamespace | None = None,
     ) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(f"Invalid mode {mode!r}; expected one of {_VALID_MODES}.")
@@ -86,6 +87,15 @@ class CyclesToolGate(AgentMiddleware):
         self._ttl_ms = ttl_ms
         self._denial_message = denial_message
         self._settlement_error_policy: SettlementErrorPolicy = settlement_error_policy
+        self._idempotency_namespace = idempotency_namespace
+
+    def _resolve_namespace(self, ctx: Any) -> str | None:
+        """Resolve the optional namespace for this call. Returns None if disabled."""
+        if self._idempotency_namespace is None:
+            return None
+        if callable(self._idempotency_namespace):
+            return self._idempotency_namespace(ctx)
+        return self._idempotency_namespace
 
     # ------------------------------------------------------------------ sync
 
@@ -100,11 +110,12 @@ class CyclesToolGate(AgentMiddleware):
         tool_call_id = coerce_tool_call_id(str(tool_call.get("id", "")) or None)
         subject = resolve_subject(self._subject, request, get_state(request))
         action = resolve_action(self._action, request, tool_name)
+        namespace = self._resolve_namespace(request)
 
         if self._mode in ("decide", "decide+reserve"):
             decide_resp = self._client.decide(
                 DecisionRequest(
-                    idempotency_key=make_idempotency_key("decide", tool_call_id),
+                    idempotency_key=make_idempotency_key("decide", tool_call_id, namespace=namespace),
                     subject=subject,
                     action=action,
                     estimate=self._estimate,
@@ -119,7 +130,7 @@ class CyclesToolGate(AgentMiddleware):
         if self._mode == "decide":
             return handler(request)
 
-        return self._reserve_and_run_sync(request, handler, subject, action, tool_name, tool_call_id)
+        return self._reserve_and_run_sync(request, handler, subject, action, tool_name, tool_call_id, namespace)
 
     def _reserve_and_run_sync(
         self,
@@ -129,9 +140,10 @@ class CyclesToolGate(AgentMiddleware):
         action: Any,
         tool_name: str | None,
         tool_call_id: str,
+        namespace: str | None,
     ) -> Any:
         assert isinstance(self._client, CyclesClient)
-        idem = make_idempotency_key("res", tool_call_id)
+        idem = make_idempotency_key("res", tool_call_id, namespace=namespace)
         reserve_resp = self._client.create_reservation(
             ReservationCreateRequest(
                 idempotency_key=idem,
@@ -207,11 +219,12 @@ class CyclesToolGate(AgentMiddleware):
         tool_call_id = coerce_tool_call_id(str(tool_call.get("id", "")) or None)
         subject = resolve_subject(self._subject, request, get_state(request))
         action = resolve_action(self._action, request, tool_name)
+        namespace = self._resolve_namespace(request)
 
         if self._mode in ("decide", "decide+reserve"):
             decide_resp = await self._client.decide(
                 DecisionRequest(
-                    idempotency_key=make_idempotency_key("decide", tool_call_id),
+                    idempotency_key=make_idempotency_key("decide", tool_call_id, namespace=namespace),
                     subject=subject,
                     action=action,
                     estimate=self._estimate,
@@ -229,7 +242,7 @@ class CyclesToolGate(AgentMiddleware):
                 result = await result
             return result
 
-        return await self._reserve_and_run_async(request, handler, subject, action, tool_name, tool_call_id)
+        return await self._reserve_and_run_async(request, handler, subject, action, tool_name, tool_call_id, namespace)
 
     async def _reserve_and_run_async(
         self,
@@ -239,9 +252,10 @@ class CyclesToolGate(AgentMiddleware):
         action: Any,
         tool_name: str | None,
         tool_call_id: str,
+        namespace: str | None,
     ) -> Any:
         assert isinstance(self._client, AsyncCyclesClient)
-        idem = make_idempotency_key("res", tool_call_id)
+        idem = make_idempotency_key("res", tool_call_id, namespace=namespace)
         reserve_resp = await self._client.create_reservation(
             ReservationCreateRequest(
                 idempotency_key=idem,

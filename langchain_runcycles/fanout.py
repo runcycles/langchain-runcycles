@@ -21,7 +21,7 @@ from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage
 from runcycles import Action, AsyncCyclesClient, CyclesClient, DecisionRequest
 
-from langchain_runcycles._config import DenialFormatter, SubjectConfig, TurnCounter
+from langchain_runcycles._config import DenialFormatter, IdempotencyNamespace, SubjectConfig, TurnCounter
 from langchain_runcycles._internal import (
     _DEFAULT_ESTIMATE,
     denial_reason,
@@ -73,6 +73,7 @@ class CyclesFanOutGate(AgentMiddleware):
         turn_counter: TurnCounter = _default_turn_counter,
         cap_message: str = "Fan-out cap reached: {turns} of {max_turns} model turns used.",
         denial_message: DenialFormatter = "Agent halted by Cycles policy: {reason}",
+        idempotency_namespace: IdempotencyNamespace | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be >= 1")
@@ -90,6 +91,15 @@ class CyclesFanOutGate(AgentMiddleware):
         self._turn_counter = turn_counter
         self._cap_message = cap_message
         self._denial_message = denial_message
+        self._idempotency_namespace = idempotency_namespace
+
+    def _resolve_namespace(self, state: Any) -> str | None:
+        """Resolve the optional namespace from state. Returns None if disabled."""
+        if self._idempotency_namespace is None:
+            return None
+        if callable(self._idempotency_namespace):
+            return self._idempotency_namespace(state)
+        return self._idempotency_namespace
 
     # ------------------------------------------------------------------ sync
 
@@ -109,7 +119,9 @@ class CyclesFanOutGate(AgentMiddleware):
             )
         decide_resp = self._client.decide(
             DecisionRequest(
-                idempotency_key=make_idempotency_key("fanout-decide"),
+                idempotency_key=make_idempotency_key(
+                    "fanout-decide", namespace=self._resolve_namespace(state)
+                ),
                 subject=resolve_subject(self._subject, state, state),
                 action=resolve_action(self._action, state, None),
                 estimate=_DEFAULT_ESTIMATE,
@@ -142,7 +154,9 @@ class CyclesFanOutGate(AgentMiddleware):
             )
         decide_resp = await self._client.decide(
             DecisionRequest(
-                idempotency_key=make_idempotency_key("fanout-decide"),
+                idempotency_key=make_idempotency_key(
+                    "fanout-decide", namespace=self._resolve_namespace(state)
+                ),
                 subject=resolve_subject(self._subject, state, state),
                 action=resolve_action(self._action, state, None),
                 estimate=_DEFAULT_ESTIMATE,

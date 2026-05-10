@@ -28,3 +28,11 @@ or a callable taking the CyclesResponse and returning a denial message."""
 
 TurnCounter: TypeAlias = Callable[[Any], int]
 """(state) -> turn count. Default counts AIMessages; override for custom semantics."""
+
+IdempotencyNamespaceResolver: TypeAlias = Callable[[Any], str]
+IdempotencyNamespace: TypeAlias = str | IdempotencyNamespaceResolver
+"""Optional run/workflow/tenant scope woven into Cycles idempotency keys.
+Static string or a callable receiving the request (tool gate) or state
+(fan-out gate). When supplied, keys take the shape
+``{prefix}-{namespace}-{tool_call_id}``; without it, the v0.1.2 shape
+``{prefix}-{tool_call_id}`` is preserved (back-compat)."""
