@@ -511,6 +511,62 @@ def test_namespace_prevents_cross_run_collision(
     assert key_a != key_b
 
 
+def test_callable_namespace_returning_none_opts_out_per_call(
+    sync_client: CyclesClient, subject: Any, action: Any
+) -> None:
+    """A callable namespace returning None disables namespacing for that call.
+
+    Useful when some calls should be globally scoped (admin / system tools) and
+    others run-scoped — the user can branch on `request.tool_call['name']` and
+    return None for the unscoped path, falling back to the v0.1.2 shape.
+    """
+    def conditional_namespace(request: Any) -> str | None:
+        if request.tool_call["name"] == "admin_tool":
+            return None
+        return "user_run"
+
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="decide",
+        idempotency_namespace=conditional_namespace,
+    )
+    gate.wrap_tool_call(FakeToolCallRequest(name="admin_tool", call_id="tc_admin"), lambda r: "ok")
+    admin_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    gate.wrap_tool_call(FakeToolCallRequest(name="user_tool", call_id="tc_user"), lambda r: "ok")
+    user_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    assert admin_key == "decide-tc_admin"  # v0.1.2 shape (no namespace)
+    assert user_key == "decide-user_run-tc_user"  # namespaced
+
+
+def test_release_key_inherits_namespace_on_tool_exception(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """release_reservation key inherits the namespace via the reservation key it composes from.
+
+    Without this guarantee, a retried release call would target the wrong
+    reservation (or none at all) under runs with reused tool_call_ids.
+    """
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        idempotency_namespace="run_abc",
+    )
+
+    def boom(_r: Any) -> Any:
+        raise RuntimeError("tool failed")
+
+    with pytest.raises(RuntimeError, match="tool failed"):
+        gate.wrap_tool_call(tool_call_request, boom)
+
+    release_args, _ = sync_client.release_reservation.call_args  # type: ignore[attr-defined]
+    release_key = release_args[1].idempotency_key
+    assert release_key == "release-res-run_abc-tc_1"
+
+
 # --- helper: a tiny capturer scoped to a logger -----------------------------------
 
 
