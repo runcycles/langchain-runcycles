@@ -51,7 +51,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 _VALID_MODES: tuple[str, ...] = ("decide", "reserve", "decide+reserve")
+_VALID_SETTLEMENT_POLICIES: tuple[str, ...] = ("raise", "log")
 Mode = Literal["decide", "reserve", "decide+reserve"]
+SettlementErrorPolicy = Literal["raise", "log"]
 
 
 class CyclesToolGate(AgentMiddleware):
@@ -67,9 +69,15 @@ class CyclesToolGate(AgentMiddleware):
         estimate: Amount | None = None,
         ttl_ms: int = 60_000,
         denial_message: DenialFormatter = "Tool call denied by Cycles policy: {reason}",
+        settlement_error_policy: SettlementErrorPolicy = "raise",
     ) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(f"Invalid mode {mode!r}; expected one of {_VALID_MODES}.")
+        if settlement_error_policy not in _VALID_SETTLEMENT_POLICIES:
+            raise ValueError(
+                f"Invalid settlement_error_policy {settlement_error_policy!r}; "
+                f"expected one of {_VALID_SETTLEMENT_POLICIES}."
+            )
         self._client = client
         self._subject = subject
         self._action = action
@@ -77,6 +85,7 @@ class CyclesToolGate(AgentMiddleware):
         self._estimate = estimate or _DEFAULT_ESTIMATE
         self._ttl_ms = ttl_ms
         self._denial_message = denial_message
+        self._settlement_error_policy: SettlementErrorPolicy = settlement_error_policy
 
     # ------------------------------------------------------------------ sync
 
@@ -161,8 +170,18 @@ class CyclesToolGate(AgentMiddleware):
                     actual=self._estimate,
                 ),
             )
-        except Exception:  # pragma: no cover - defensive; commit failure must not mask a successful tool call
-            logger.warning("Cycles commit failed for reservation %s", reservation_id, exc_info=True)
+        except Exception:
+            if self._settlement_error_policy == "raise":
+                # Strict governance default: tool ran but commit failed; surface the
+                # exception so the caller can reconcile rather than silently dropping
+                # accounting. Use settlement_error_policy="log" for best-effort UX.
+                raise
+            logger.warning(
+                "Cycles commit failed for reservation %s; settlement_error_policy='log' "
+                "so the tool result is preserved (reservation will expire via TTL)",
+                reservation_id,
+                exc_info=True,
+            )
         return result
 
     def _safe_release_sync(self, reservation_id: str, idem: str) -> None:
@@ -263,8 +282,16 @@ class CyclesToolGate(AgentMiddleware):
                     actual=self._estimate,
                 ),
             )
-        except Exception:  # pragma: no cover - defensive
-            logger.warning("Cycles commit failed for reservation %s", reservation_id, exc_info=True)
+        except Exception:
+            if self._settlement_error_policy == "raise":
+                # See sync sibling: governance-first default surfaces commit failure.
+                raise
+            logger.warning(
+                "Cycles commit failed for reservation %s; settlement_error_policy='log' "
+                "so the tool result is preserved (reservation will expire via TTL)",
+                reservation_id,
+                exc_info=True,
+            )
         return result
 
     async def _safe_release_async(self, reservation_id: str, idem: str) -> None:

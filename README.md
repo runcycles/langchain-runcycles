@@ -4,11 +4,18 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)](https://github.com/runcycles/langchain-runcycles/actions)
 
-# LangChain Runcycles — AI agent middleware for budget and action authority
+# Cycles for LangChain — AI agent middleware for budget and action authority
 
-**LangChain agent middleware for AI agent governance — enforce cost limits, tool permissions, and multi-tenant policies in `create_agent` workflows before LLM calls or tool actions execute.** Works with LangGraph, LangSmith, OpenAI, Anthropic, MCP servers, and any LangChain 1.x agent runtime — built on the new [`AgentMiddleware`](https://docs.langchain.com/oss/python/langchain/middleware/) API (`wrap_tool_call`, `before_model`, `wrap_model_call`).
+**LangChain middleware for pre-tool-call authorization, fan-out caps, and per-tenant budget enforcement in `create_agent` workflows.** Provider-neutral: works with any LangChain 1.x agent regardless of model provider, as long as actions flow through LangChain middleware/tool execution.
 
-`AgentMiddleware` subclasses for the [Cycles Protocol](https://github.com/runcycles/cycles-protocol): gate every tool call with `wrap_tool_call`, cap model fan-out with `before_model` + `jump_to: "end"`, reserve and commit budget per call — with sync and async support, typed configuration, and optional remote policy decisions. Install via `pip install langchain-runcycles`.
+Built on LangChain's [`AgentMiddleware`](https://docs.langchain.com/oss/python/langchain/middleware/) API:
+
+- **`wrap_tool_call`** — tool-call authorization plus optional reserve/commit/release lifecycle around each tool execution
+- **`before_model`** (with `@hook_config(can_jump_to=["end"])`) — fan-out caps and external policy halts before another model turn
+
+Model-call reservation via `wrap_model_call` is on the roadmap but **not implemented in v0.1.x**. For token-level streaming budget tracking today, use `runcycles.stream_reservation` directly inside an LLM-spend handler.
+
+Install via `pip install langchain-runcycles`.
 
 ## What's in the box
 
@@ -151,6 +158,27 @@ gate = CyclesToolGate(
 - **Tool exceptions** in `"reserve"` mode trigger an automatic `release_reservation`, then the exception propagates.
 - **Async/sync mismatch** raises `TypeError` — pair `CyclesClient` with `.invoke()` and `AsyncCyclesClient` with `.ainvoke()`.
 
+### Settlement (commit) failures
+
+In `"reserve"` and `"decide+reserve"` modes, the tool runs first, then the reservation is committed. If the commit call itself fails (network blip, server overload, etc.), the tool already ran — its side effect is real. You have two reasonable options, controlled by `settlement_error_policy`:
+
+| Policy | Behavior | When to choose |
+|---|---|---|
+| `"raise"` (default) | Propagate the commit exception to the agent. The tool's return value is lost. | Strict governance — no tool-level cost can go unaccounted. |
+| `"log"` | Log a warning, return the tool result anyway. The reservation will eventually expire via TTL. | UX-first — keep the agent moving, accept best-effort accounting. |
+
+```python
+gate = CyclesToolGate(
+    client,
+    subject=...,
+    action=...,
+    mode="reserve",
+    settlement_error_policy="log",   # opt out of strict default
+)
+```
+
+This only affects commit (success-path settlement); release on tool failure always logs and continues so the original tool exception wins.
+
 ## Async support
 
 Async middleware variants run automatically when the LangChain agent is invoked with `.ainvoke()`. Pass an `AsyncCyclesClient`:
@@ -173,9 +201,9 @@ await agent.ainvoke({"messages": [...]})
 ## Known limitations (v0.1)
 
 - **Reserve mode commits at the configured `estimate`, not actual usage.** `mode="reserve"` and `mode="decide+reserve"` reserve the estimate, run the tool, then commit *the same amount* on success. Per-tool actual-cost instrumentation (analogous to `runcycles.stream_reservation`'s `cost_fn`) is on the roadmap. Until then, set `estimate` to the worst-case spend per call you're willing to debit, or use `mode="decide"` if you only want policy gating without budget movement.
-- **No streaming-LLM cost integration yet.** `wrap_model_call` is not implemented in v0.1; for token-level streaming budget tracking, use `runcycles.stream_reservation` directly inside an LLM-spend handler.
-- **Per-call subject only via the extractor form.** Static `Subject` plays one tenant per middleware instance. For per-tenant/per-agent routing in a multi-tenant deployment, supply a `SubjectExtractor` callable.
-- **Synthetic `tool_call_id` when missing.** If a `ToolCallRequest` arrives without an `id`, the middleware fabricates `missing-<hex>` for the `ToolMessage` and logs a warning. Correct LangChain runtimes always supply `id`; this is a defensive fallback.
+- **No model-call middleware yet.** `wrap_model_call` is on the roadmap (planned for v0.2 as `CyclesModelGate`); v0.1.x covers tool-call gating and fan-out caps only. For LLM-spend tracking today, use `runcycles.stream_reservation` directly inside an LLM-spend handler.
+- **Per-call subject only via the extractor form.** Static `Subject` pins one tenant per middleware instance. For per-tenant/per-agent routing in a multi-tenant deployment, supply a `SubjectExtractor` callable.
+- **Idempotency keys are deterministic only when `tool_call_id` is present.** Keys take the shape `{prefix}-{tool_call_id}` so retries land on the same Cycles reservation. If the upstream omits `tool_call_id`, the middleware synthesizes a fresh `missing-<hex>` id (and logs a warning) — that path is non-deterministic across retries because the synthesis itself is random. Conformant LangChain runtimes always supply `id`.
 
 ## Development
 

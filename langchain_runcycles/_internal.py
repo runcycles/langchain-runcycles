@@ -100,9 +100,20 @@ def format_denial(formatter: DenialFormatter, response: CyclesResponse, tool_nam
 
 
 def make_idempotency_key(prefix: str, suffix: str | None = None) -> str:
-    """Build an idempotency key. Suffix is included verbatim if provided (e.g. tool_call_id)."""
+    """Build an idempotency key. Deterministic when ``suffix`` is provided.
+
+    When ``suffix`` (typically a LangChain ``tool_call_id``) is supplied, the
+    returned key is ``{prefix}-{suffix}`` — same call gets the same key, so
+    retries land on the same Cycles reservation rather than creating
+    duplicates. This is the failure mode Cycles is built to prevent.
+
+    A fresh UUID is used only as a last-resort fallback when no stable
+    upstream identifier is available (e.g. the upstream omitted the tool
+    call id and ``coerce_tool_call_id`` had to synthesize one — that
+    synthesized id is itself fresh per call).
+    """
     if suffix:
-        return f"{prefix}-{suffix}-{uuid.uuid4().hex[:8]}"
+        return f"{prefix}-{suffix}"
     return f"{prefix}-{uuid.uuid4().hex}"
 
 
