@@ -22,6 +22,7 @@ works as a run/workflow scope).
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 from langchain.agents.middleware import AgentMiddleware
@@ -85,6 +86,12 @@ class CyclesModelGate(AgentMiddleware):
             raise ValueError(
                 f"Invalid settlement_error_policy {settlement_error_policy!r}; "
                 f"expected one of {_VALID_SETTLEMENT_POLICIES}."
+            )
+        if isinstance(action, Mapping):
+            raise TypeError(
+                "CyclesModelGate.action does not support per-tool Mapping: model "
+                "calls don't carry a tool name. Pass a single Action or a "
+                "Callable[[ModelRequest], Action]."
             )
         self._client = client
         self._subject = subject

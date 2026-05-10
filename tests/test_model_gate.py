@@ -32,6 +32,22 @@ def test_invalid_settlement_policy_raises(sync_client: CyclesClient, subject: An
         )
 
 
+def test_model_gate_rejects_mapping_action(sync_client: CyclesClient, subject: Any) -> None:
+    """A per-tool-name Mapping makes no sense for CyclesModelGate (which gates
+    LLM calls, not tool calls). Reject at construction with a clear error rather
+    than letting it fail mid-call with the less-informative 'tool name required'
+    error from resolve_action."""
+    from runcycles import Action
+
+    mapping = {"some_tool": Action(kind="tool.call", name="some_tool")}
+    with pytest.raises(TypeError, match="does not support per-tool Mapping"):
+        CyclesModelGate(
+            sync_client,
+            subject=subject,
+            action=mapping,  # type: ignore[arg-type]
+        )
+
+
 # --- decide-mode paths ---------------------------------------------------------------
 
 
