@@ -1,7 +1,7 @@
 # langchain-runcycles — Middleware API Conformance Audit
 
 **Date:** 2026-05-10
-**Package:** `langchain-runcycles` v0.1.5
+**Package:** `langchain-runcycles` v0.1.6
 **LangChain target:** `langchain >= 1.0, < 2.0`, `langchain-core >= 1.0, < 2.0` (tested against `langchain==1.2.18`, `langchain-core==1.3.3`, `langgraph==1.1.10`)
 **Cycles SDK target:** `runcycles >= 0.4.1` (tested against `runcycles==0.4.1`, Python 3.10+)
 **Server audit:** Cycles protocol conformance is owned by [`cycles-client-python/AUDIT.md`](https://github.com/runcycles/cycles-client-python/blob/main/AUDIT.md). This document audits this package's contract with the LangChain agent middleware API only.
@@ -28,12 +28,14 @@
 
 Compared the following across LangChain documentation and this package's source:
 
-- `AgentMiddleware` subclassing and hook overrides
-- `wrap_tool_call`, `before_model` (sync); `awrap_tool_call`, `abefore_model` (async)
+- `AgentMiddleware` subclassing and hook overrides for all three middleware classes
+- `wrap_model_call`, `wrap_tool_call`, `before_model` (sync); `awrap_model_call`, `awrap_tool_call`, `abefore_model` (async)
 - `@hook_config(can_jump_to=["end"])` usage on fan-out halt
-- `ToolMessage` shape on denial (`tool_call_id`, `content`)
+- `ToolMessage` shape on tool-gate denial (`tool_call_id`, `content`)
+- `ModelResponse(result=[AIMessage(...)])` shape on model-gate denial (terminates agent loop because the AIMessage has no `tool_calls`)
 - `jump_to: "end"` halt return shape
 - `AsyncCyclesClient` parity with `CyclesClient` for every consumed SDK method
+- `settlement_error_policy` / `idempotency_namespace` parity across `CyclesToolGate` and `CyclesModelGate`
 
 ## Hooks used
 
@@ -66,10 +68,10 @@ ToolMessage(content=<denial-string>, tool_call_id=<request.tool_call['id']>)
 
 | Method | Used in | Mode |
 |---|---|---|
-| `client.decide(DecisionRequest)` | `tool_gate.py` (decide / decide+reserve), `fanout.py` (when client provided) | sync + async |
-| `client.create_reservation(ReservationCreateRequest)` | `tool_gate.py` (reserve / decide+reserve) | sync + async |
-| `client.commit_reservation(reservation_id, CommitRequest)` | `tool_gate.py` (reserve / decide+reserve, success path) | sync + async |
-| `client.release_reservation(reservation_id, ReleaseRequest)` | `tool_gate.py` (reserve / decide+reserve, exception path) | sync + async |
+| `client.decide(DecisionRequest)` | `tool_gate.py` (decide / decide+reserve), `model_gate.py` (decide / decide+reserve), `fanout.py` (when client provided) | sync + async |
+| `client.create_reservation(ReservationCreateRequest)` | `tool_gate.py` + `model_gate.py` (reserve / decide+reserve) | sync + async |
+| `client.commit_reservation(reservation_id, CommitRequest)` | `tool_gate.py` + `model_gate.py` (reserve / decide+reserve, success path) | sync + async |
+| `client.release_reservation(reservation_id, ReleaseRequest)` | `tool_gate.py` + `model_gate.py` (reserve / decide+reserve, exception path) | sync + async |
 | `CyclesResponse.{is_success, body, get_body_attribute, get_error_response}` | `_internal.py` | n/a |
 
 Type model imports from `runcycles`:

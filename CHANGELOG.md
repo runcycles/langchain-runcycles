@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-05-10
+
+Doc cleanup pass. v0.1.5 shipped `CyclesModelGate` but several places in the repo still described the package as "two middleware classes" or "no model-call middleware yet." External review caught the staleness; this release brings the user-visible metadata in line with what the v0.1.5 code actually does. No code changes; behavior is identical to v0.1.5.
+
+### Fixed
+
+- **`pyproject.toml` description** now reads "pre-execution budget authority for model calls, tool calls, and runaway agent loops" (was "pre-tool-call authorization, fan-out caps, and per-tenant budget enforcement"). PyPI listing now correctly advertises the v0.1.5 surface.
+- **`langchain_runcycles/__init__.py` module docstring** now describes three `AgentMiddleware` subclasses (was two), with composition guidance (fan-out → model → tool ordering).
+- **README "Known limitations"**: replaced "No model-call middleware yet" with the accurate "architecture-complete but commits at estimate" framing — `CyclesModelGate` exists, just doesn't yet extract actual provider token usage.
+- **`docs/runcycles.mdx`**: opening paragraph updated from "two classes" to "three classes"; Details metadata table now lists `CyclesModelGate` alongside `CyclesToolGate` and `CyclesFanOutGate`; "v0.1.x scope" subsection rewritten to honestly distinguish architecture milestone (v0.1.5) from production polish (v0.2.0).
+- **`AUDIT.md`** Audit Scope section now lists model hooks (`wrap_model_call` / `awrap_model_call`); SDK methods table now references `model_gate.py` alongside `tool_gate.py` for `decide` / `create_reservation` / `commit_reservation` / `release_reservation`.
+
+### Behavior change
+
+None. Doc cleanup only. v0.1.5 callers' code unchanged.
+
 ## [0.1.5] - 2026-05-10
 
 Adds `CyclesModelGate` — pre-model-call authorization middleware — closing the third leg of the LangChain agent governance triad. Closes #10.
@@ -122,6 +138,7 @@ Initial public release. First-class LangChain agent middleware integration for C
 - Examples: `tenant_budget_agent.py` (tenant cap + risky-tool denial) and `multi_agent_fanout.py` (multi-agent / HITL flow).
 - `AUDIT.md` documenting LangChain middleware API conformance (hooks, ToolMessage shape, jump_to semantics, SDK methods consumed).
 
+[0.1.6]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.2...v0.1.3

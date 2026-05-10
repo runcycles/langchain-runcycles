@@ -1,15 +1,23 @@
 """langchain-runcycles — Cycles middleware for LangChain agents.
 
-Exposes two ``AgentMiddleware`` subclasses:
+Exposes three ``AgentMiddleware`` subclasses, completing the LangChain
+agent governance triad of model + tool + fan-out:
 
-* :class:`CyclesToolGate` — gates each tool call via the Cycles SDK
-  (``decide``, ``reserve``, or both). Returns a ``ToolMessage`` on denial so
-  the model can recover.
-* :class:`CyclesFanOutGate` — caps model turns per run and optionally consults
-  ``decide()`` on each turn so an external policy service can halt fan-out.
+* :class:`CyclesModelGate` (v0.1.5+) — gates each LLM call via the Cycles
+  SDK (``decide``, ``reserve``, or both). Returns a ``ModelResponse`` whose
+  ``AIMessage`` carries the denial reason on deny, so the agent terminates
+  naturally.
+* :class:`CyclesToolGate` — gates each tool call. Returns a ``ToolMessage``
+  on denial so the model can recover.
+* :class:`CyclesFanOutGate` — caps model turns per run and optionally
+  consults ``decide()`` on each turn so an external policy service can halt
+  fan-out.
 
-Both classes work with sync or async Cycles clients; pair the right client
-with ``.invoke()`` / ``.ainvoke()`` on the LangChain agent.
+All three work with sync or async Cycles clients; pair the right client
+with ``.invoke()`` / ``.ainvoke()`` on the LangChain agent. Compose them in
+a single ``middleware=[...]`` list — natural ordering is fan-out → model
+→ tool so runaway loops halt before model spend, and model spend reserves
+before tool side effects.
 """
 
 from langchain_runcycles._config import (
