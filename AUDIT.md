@@ -90,30 +90,32 @@ Key shape, in order of preference:
 | set | unset | `{prefix}-{namespace}-{32-hex}` (run-scoped, per-call random) |
 | unset | unset | `{prefix}-{32-hex}` (last-resort fallback) |
 
-Per-operation prefixes (unchanged):
+Per-operation prefixes:
 
 | Operation | Prefix |
 |---|---|
 | `decide` (tool gate) | `decide` |
-| `create_reservation` | `res` |
+| `create_reservation` (tool gate) | `res` |
 | `commit_reservation` | `commit-{reservation-key}` (composed from create) |
 | `release_reservation` | `release-{reservation-key}` (composed from create) |
 | `decide` (fanout) | `fanout-decide` |
+| `decide` (model gate, v0.1.5+) | `model-decide` |
+| `create_reservation` (model gate, v0.1.5+) | `model-res` |
 
-`namespace` is configured via `idempotency_namespace` on `CyclesToolGate` / `CyclesFanOutGate` — accepts a static string or a callable. The callable receives the request (tool gate) or state (fan-out gate) so users can extract a workflow run id, tenant id, etc. per call.
+`namespace` is configured via `idempotency_namespace` on `CyclesModelGate` / `CyclesToolGate` / `CyclesFanOutGate` — accepts a static string or a callable. The callable receives the request (model and tool gates) or state (fan-out gate) so users can extract a workflow run id, tenant id, etc. per call.
 
 Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic_per_tool_call_id`, `::test_idempotency_key_retry_lands_on_same_key`, `::test_make_idempotency_key_with_namespace_and_suffix`, `::test_idempotency_namespace_as_static_string`, `::test_idempotency_namespace_as_callable`, `::test_namespace_prevents_cross_run_collision`, plus `tests/test_fanout.py::test_fanout_idempotency_namespace_callable_from_state` and async siblings.
 
 ## Reservation lifecycle
 
-`tool_gate.py` paths in `reserve` / `decide+reserve` mode:
+`tool_gate.py` and `model_gate.py` paths in `reserve` / `decide+reserve` mode (model-gate paths added v0.1.5+):
 
-1. Pre-call: `create_reservation` → if not success or no `reservation_id`, return `ToolMessage` denial.
-2. Run handler.
-3. Success: `commit_reservation` (commits at the configured `estimate`; tool-level actual-cost instrumentation is left to the caller for v0.1.x).
+1. Pre-call: `create_reservation` → if not success or no `reservation_id`, return denial — `ToolMessage` for `CyclesToolGate`, `ModelResponse(result=[AIMessage(...)])` for `CyclesModelGate`.
+2. Run handler (the wrapped tool call or model call).
+3. Success: `commit_reservation` (commits at the configured `estimate`; per-call actual-cost instrumentation is left to the caller for v0.1.x — provider-specific token extraction for `CyclesModelGate` is v0.2.0 scope).
 4. Exception: `release_reservation`, then re-raise.
 
-**Settlement-failure handling** (v0.1.2+): if the success-path `commit_reservation` itself raises, behavior is governed by `settlement_error_policy` on `CyclesToolGate` — default `"raise"` propagates the commit exception so the caller can reconcile (strict governance); opt-in `"log"` swallows the failure and returns the tool result (best-effort accounting; reservation expires via TTL). The release path on tool-side exception always logs and continues so the original tool exception wins.
+**Settlement-failure handling** (v0.1.2+ for tool gate, v0.1.5+ for model gate): if the success-path `commit_reservation` itself raises, behavior is governed by `settlement_error_policy` on `CyclesToolGate` and `CyclesModelGate` — default `"raise"` propagates the commit exception so the caller can reconcile (strict governance); opt-in `"log"` swallows the failure and returns the result (best-effort accounting; reservation expires via TTL). The release path on handler-side exception always logs and continues so the original handler exception wins.
 
 ## Test coverage
 
@@ -136,18 +138,18 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 - **Synthetic `tool_call_id` when missing.** A `ToolCallRequest` with no `id` field has its denial `ToolMessage` correlated via a fabricated `missing-<12-hex>` id, with a warning logged at `langchain_runcycles._internal`. Because the synthesis is fresh per call, the resulting idempotency key on this fallback path is *not* retry-stable. Conformant LangChain runtimes always supply `id`. Locked down by `tests/test_tool_gate.py::test_synthetic_tool_call_id_when_missing`.
 - **Fan-out gate rejects per-tool action mappings.** `CyclesFanOutGate` gates *model turns*, not tool calls; a per-tool-name `Mapping` for `action` is meaningless there and is rejected at construction with `TypeError`. Locked down by `tests/test_fanout.py::test_fanout_rejects_mapping_action`.
 
-## Settlement error policy (v0.1.2+)
+## Settlement error policy (v0.1.2+ tool gate, v0.1.5+ model gate)
 
-The `commit_reservation` call happens *after* the gated tool already ran, so a commit failure has two reasonable resolutions and `CyclesToolGate` exposes them as `settlement_error_policy`:
+The `commit_reservation` call happens *after* the gated handler (tool call or model call) already ran, so a commit failure has two reasonable resolutions. `CyclesToolGate` and `CyclesModelGate` expose them as `settlement_error_policy`:
 
 | Policy | Behavior |
 |---|---|
-| `"raise"` (default) | Surface the commit exception. Tool result is lost; caller reconciles. Strict-governance default — no tool-level cost goes unaccounted. |
-| `"log"` | Log a warning, return the tool result. Reservation expires via TTL. Best-effort accounting; preferred when UX continuity matters more than per-call settlement guarantees. |
+| `"raise"` (default) | Surface the commit exception. Handler result is lost; caller reconciles. Strict-governance default — no cost goes unaccounted. |
+| `"log"` | Log a warning, return the handler result. Reservation expires via TTL. Best-effort accounting; preferred when UX continuity matters more than per-call settlement guarantees. |
 
-The release path (on tool-side exception) always logs and continues so the original tool exception wins; settlement_error_policy applies only to the success-path commit.
+The release path (on handler-side exception) always logs and continues so the original handler exception wins; settlement_error_policy applies only to the success-path commit.
 
-Locked down by `test_settlement_raise_default_propagates_commit_failure`, `test_settlement_log_swallows_commit_failure`, and async siblings.
+Locked down by `tests/test_tool_gate.py::test_settlement_raise_default_propagates_commit_failure`, `::test_settlement_log_swallows_commit_failure`, the corresponding `tests/test_model_gate.py` parity tests, and async siblings.
 
 ## Idempotency-key determinism (v0.1.2+)
 
