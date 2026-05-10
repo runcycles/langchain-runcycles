@@ -35,10 +35,9 @@ from typing import Any
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_core.tools import tool
-
-from langchain_runcycles import CyclesFanOutGate, CyclesToolGate
 from runcycles import Action, CyclesClient, CyclesConfig, Subject
 
+from langchain_runcycles import CyclesFanOutGate, CyclesToolGate
 
 # --- tools ---
 

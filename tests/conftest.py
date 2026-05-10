@@ -62,8 +62,14 @@ def sync_client() -> Iterator[CyclesClient]:
     client.commit_reservation = MagicMock(return_value=commit_ok())  # type: ignore[method-assign]
     client.release_reservation = MagicMock(return_value=release_ok())  # type: ignore[method-assign]
     yield client
+    client.close()
 
 
+# Note: AsyncCyclesClient cleanup intentionally omitted. The httpx.AsyncClient inside
+# would need `await client.aclose()` to close cleanly, which requires running the
+# event loop in fixture teardown. Since methods are mock-replaced and no real HTTP
+# is issued, the underlying connection pool is empty — letting GC reclaim it is fine
+# for short-lived test runs. Convert to @pytest_asyncio.fixture if real HTTP is added.
 @pytest.fixture
 def async_client() -> Iterator[AsyncCyclesClient]:
     config = CyclesConfig(base_url="http://test", api_key="test-key", tenant="acme")

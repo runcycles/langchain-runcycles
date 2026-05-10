@@ -21,9 +21,9 @@ import os
 
 from langchain.agents import create_agent
 from langchain_core.tools import tool
+from runcycles import Action, CyclesClient, CyclesConfig, Subject
 
 from langchain_runcycles import CyclesToolGate
-from runcycles import Action, CyclesClient, CyclesConfig, Subject
 
 
 @tool

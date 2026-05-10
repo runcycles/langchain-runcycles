@@ -30,11 +30,12 @@ from runcycles import (
     DecisionRequest,
     ReleaseRequest,
     ReservationCreateRequest,
-    Unit,
 )
 
 from langchain_runcycles._config import ActionConfig, DenialFormatter, SubjectConfig
 from langchain_runcycles._internal import (
+    _DEFAULT_ESTIMATE,
+    coerce_tool_call_id,
     format_denial,
     get_state,
     get_tool_call,
@@ -49,9 +50,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
+_VALID_MODES: tuple[str, ...] = ("decide", "reserve", "decide+reserve")
 Mode = Literal["decide", "reserve", "decide+reserve"]
-
-_DEFAULT_ESTIMATE = Amount(unit=Unit.USD_MICROCENTS, amount=10_000)
 
 
 class CyclesToolGate(AgentMiddleware):
@@ -68,8 +68,8 @@ class CyclesToolGate(AgentMiddleware):
         ttl_ms: int = 60_000,
         denial_message: DenialFormatter = "Tool call denied by Cycles policy: {reason}",
     ) -> None:
-        if mode not in ("decide", "reserve", "decide+reserve"):
-            raise ValueError(f"Invalid mode {mode!r}; expected decide / reserve / decide+reserve.")
+        if mode not in _VALID_MODES:
+            raise ValueError(f"Invalid mode {mode!r}; expected one of {_VALID_MODES}.")
         self._client = client
         self._subject = subject
         self._action = action
@@ -88,7 +88,7 @@ class CyclesToolGate(AgentMiddleware):
             )
         tool_call = get_tool_call(request)
         tool_name = str(tool_call.get("name", "")) or None
-        tool_call_id = str(tool_call.get("id", "")) or None
+        tool_call_id = coerce_tool_call_id(str(tool_call.get("id", "")) or None)
         subject = resolve_subject(self._subject, request, get_state(request))
         action = resolve_action(self._action, request, tool_name)
 
@@ -104,7 +104,7 @@ class CyclesToolGate(AgentMiddleware):
             if not is_allowed(decide_resp):
                 return ToolMessage(
                     content=format_denial(self._denial_message, decide_resp, tool_name),
-                    tool_call_id=tool_call_id or "",
+                    tool_call_id=tool_call_id,
                 )
 
         if self._mode == "decide":
@@ -119,7 +119,7 @@ class CyclesToolGate(AgentMiddleware):
         subject: Any,
         action: Any,
         tool_name: str | None,
-        tool_call_id: str | None,
+        tool_call_id: str,
     ) -> Any:
         assert isinstance(self._client, CyclesClient)
         idem = make_idempotency_key("res", tool_call_id)
@@ -135,18 +135,21 @@ class CyclesToolGate(AgentMiddleware):
         if not reserve_resp.is_success:
             return ToolMessage(
                 content=format_denial(self._denial_message, reserve_resp, tool_name),
-                tool_call_id=tool_call_id or "",
+                tool_call_id=tool_call_id,
             )
         reservation_id = reserve_resp.get_body_attribute("reservation_id")
         if not reservation_id:
             return ToolMessage(
                 content=format_denial(self._denial_message, reserve_resp, tool_name),
-                tool_call_id=tool_call_id or "",
+                tool_call_id=tool_call_id,
             )
 
         try:
             result = handler(request)
         except BaseException:
+            # Catch BaseException (not just Exception) so KeyboardInterrupt / SystemExit
+            # also release the reservation rather than leaking it. We re-raise immediately;
+            # _safe_release_sync swallows release-side failures so the original cause wins.
             self._safe_release_sync(reservation_id, idem)
             raise
 
@@ -182,7 +185,7 @@ class CyclesToolGate(AgentMiddleware):
             )
         tool_call = get_tool_call(request)
         tool_name = str(tool_call.get("name", "")) or None
-        tool_call_id = str(tool_call.get("id", "")) or None
+        tool_call_id = coerce_tool_call_id(str(tool_call.get("id", "")) or None)
         subject = resolve_subject(self._subject, request, get_state(request))
         action = resolve_action(self._action, request, tool_name)
 
@@ -198,7 +201,7 @@ class CyclesToolGate(AgentMiddleware):
             if not is_allowed(decide_resp):
                 return ToolMessage(
                     content=format_denial(self._denial_message, decide_resp, tool_name),
-                    tool_call_id=tool_call_id or "",
+                    tool_call_id=tool_call_id,
                 )
 
         if self._mode == "decide":
@@ -216,7 +219,7 @@ class CyclesToolGate(AgentMiddleware):
         subject: Any,
         action: Any,
         tool_name: str | None,
-        tool_call_id: str | None,
+        tool_call_id: str,
     ) -> Any:
         assert isinstance(self._client, AsyncCyclesClient)
         idem = make_idempotency_key("res", tool_call_id)
@@ -232,13 +235,13 @@ class CyclesToolGate(AgentMiddleware):
         if not reserve_resp.is_success:
             return ToolMessage(
                 content=format_denial(self._denial_message, reserve_resp, tool_name),
-                tool_call_id=tool_call_id or "",
+                tool_call_id=tool_call_id,
             )
         reservation_id = reserve_resp.get_body_attribute("reservation_id")
         if not reservation_id:
             return ToolMessage(
                 content=format_denial(self._denial_message, reserve_resp, tool_name),
-                tool_call_id=tool_call_id or "",
+                tool_call_id=tool_call_id,
             )
 
         try:
@@ -246,6 +249,9 @@ class CyclesToolGate(AgentMiddleware):
             if hasattr(result, "__await__"):
                 result = await result
         except BaseException:
+            # See sync sibling: BaseException is intentional. On asyncio.CancelledError
+            # the await of release may itself surface the cancellation; the original
+            # cause still wins because we re-raise after best-effort release.
             await self._safe_release_async(reservation_id, idem)
             raise
 

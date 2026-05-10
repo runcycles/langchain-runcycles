@@ -57,6 +57,8 @@ Changelog = "https://github.com/runcycles/langchain-runcycles/blob/main/CHANGELO
 "Bug Tracker" = "https://github.com/runcycles/langchain-runcycles/issues"
 
 [project.optional-dependencies]
+# Slimmer than cycles-client-python's dev deps: this package mocks the runcycles
+# SDK boundary directly (no httpx/respx, no protocol-spec validation needed).
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",

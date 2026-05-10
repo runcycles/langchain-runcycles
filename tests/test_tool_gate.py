@@ -272,3 +272,110 @@ def test_get_tool_call_attribute_path() -> None:
         tool_call = {"name": "x", "args": {}, "id": "abc"}
 
     assert get_tool_call(R())["name"] == "x"
+
+
+# --- Tier 2 review-driven additions -------------------------------------------------
+
+
+def test_commit_called_with_configured_estimate(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """The reserve-mode commit body must carry actual=self._estimate, not some other amount.
+
+    AUDIT.md documents that v0.1 commits at estimate; this test makes that contract
+    enforceable so a future refactor that changes the commit amount must also update
+    the audit and this assertion.
+    """
+    from runcycles import Amount, Unit
+
+    custom_estimate = Amount(unit=Unit.USD_MICROCENTS, amount=12_345)
+    gate = CyclesToolGate(
+        sync_client, subject=subject, action=action, mode="reserve", estimate=custom_estimate
+    )
+    gate.wrap_tool_call(tool_call_request, lambda r: "ok")
+    args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
+    commit_request = args[1]
+    assert commit_request.actual == custom_estimate
+
+
+def test_idempotency_key_format_is_stable(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Idempotency keys follow the documented shape: <prefix>-<tool_call_id>-<8-hex>.
+
+    The publish workflow's release-notes extractor and the parent SDK both depend on
+    this convention. Locking it down with a regex test prevents silent drift.
+    """
+    import re
+
+    gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="decide+reserve")
+    gate.wrap_tool_call(tool_call_request, lambda r: "ok")
+
+    decide_args, _ = sync_client.decide.call_args  # type: ignore[attr-defined]
+    decide_key = decide_args[0].idempotency_key
+    assert re.match(r"^decide-tc_1-[0-9a-f]{8}$", decide_key)
+
+    reserve_args, _ = sync_client.create_reservation.call_args  # type: ignore[attr-defined]
+    reserve_key = reserve_args[0].idempotency_key
+    assert re.match(r"^res-tc_1-[0-9a-f]{8}$", reserve_key)
+
+    commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
+    assert commit_args[1].idempotency_key == f"commit-{reserve_key}"
+
+
+def test_synthetic_tool_call_id_when_missing(
+    sync_client: CyclesClient, subject: Any, action: Any
+) -> None:
+    """Missing tool_call_id is replaced with `missing-<12-hex>` and a warning is logged.
+
+    Empty strings would silently break LangChain's tool-call/response correlation.
+    """
+    import logging
+    import re
+
+    request = FakeToolCallRequest(call_id="")
+    gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="decide")
+
+    with pytest.LogCaptureHandler() if False else _capture_warnings("langchain_runcycles._internal") as logs:
+        result = gate.wrap_tool_call(request, lambda r: "should not run")
+
+    assert isinstance(result, str) or result == "should not run"  # decide allowed; no ToolMessage
+    # Trigger the deny path so the synthetic id flows into a ToolMessage and we can assert it
+    sync_client.decide.return_value = deny_response("X")  # type: ignore[attr-defined]
+    request2 = FakeToolCallRequest(call_id="")
+    result2 = gate.wrap_tool_call(request2, lambda r: "never")
+    assert isinstance(result2, ToolMessage)
+    assert re.match(r"^missing-[0-9a-f]{12}$", result2.tool_call_id)
+    # And a warning was emitted at least once
+    warning_messages = [r for r in logs if r.levelno >= logging.WARNING]
+    assert any("synthesized tool_call_id" in r.getMessage() for r in warning_messages)
+
+
+# --- helper: a tiny capturer scoped to a logger -----------------------------------
+
+
+from contextlib import contextmanager  # noqa: E402
+from logging import LogRecord  # noqa: E402
+
+
+@contextmanager
+def _capture_warnings(logger_name: str):  # type: ignore[no-untyped-def]
+    """Capture LogRecords for a logger inside a `with` block."""
+    import logging
+
+    records: list[LogRecord] = []
+
+    class _Handler(logging.Handler):
+        def emit(self, record: LogRecord) -> None:
+            records.append(record)
+
+    handler = _Handler(level=logging.DEBUG)
+    log = logging.getLogger(logger_name)
+    log.addHandler(handler)
+    previous_level = log.level
+    log.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(previous_level)

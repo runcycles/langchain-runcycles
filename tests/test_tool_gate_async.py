@@ -124,3 +124,22 @@ async def test_async_decide_then_reserve_full_path(
     gate = CyclesToolGate(async_client, subject=subject, action=action, mode="decide+reserve")
     result = await gate.awrap_tool_call(tool_call_request, lambda r: "ok")
     assert result == "ok"
+
+
+@pytest.mark.asyncio
+async def test_async_reserve_with_async_handler(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Cover the reserve-mode + coroutine-returning-handler path.
+
+    Without this, line 247 of tool_gate.py (`result = await result` inside
+    `_reserve_and_run_async`) is never exercised — the existing async coroutine
+    test only covers the decide-mode branch.
+    """
+
+    async def async_handler(_r: Any) -> str:
+        return "async tool result"
+
+    gate = CyclesToolGate(async_client, subject=subject, action=action, mode="reserve")
+    result = await gate.awrap_tool_call(tool_call_request, async_handler)
+    assert result == "async tool result"

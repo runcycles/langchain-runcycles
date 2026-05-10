@@ -14,26 +14,28 @@ with the denial reason as the AIMessage content.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Mapping
+from typing import Any, TypeAlias
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage
-from runcycles import AsyncCyclesClient, CyclesClient, DecisionRequest
+from runcycles import Action, AsyncCyclesClient, CyclesClient, DecisionRequest
 
-from langchain_runcycles._config import ActionConfig, DenialFormatter, SubjectConfig, TurnCounter
+from langchain_runcycles._config import DenialFormatter, SubjectConfig, TurnCounter
 from langchain_runcycles._internal import (
+    _DEFAULT_ESTIMATE,
     denial_reason,
     is_allowed,
     make_idempotency_key,
     resolve_action,
     resolve_subject,
 )
-from langchain_runcycles.tool_gate import _DEFAULT_ESTIMATE
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
 
 logger = logging.getLogger(__name__)
+
+# Fan-out doesn't gate per-tool, so a per-tool-name Mapping doesn't make sense here.
+# Accepting only static Action or a state-derived callable.
+FanOutActionConfig: TypeAlias = Action | Callable[[Any], Action]
 
 
 def _default_turn_counter(state: Any) -> int:
@@ -67,7 +69,7 @@ class CyclesFanOutGate(AgentMiddleware):
         *,
         client: CyclesClient | AsyncCyclesClient | None = None,
         subject: SubjectConfig | None = None,
-        action: ActionConfig | None = None,
+        action: FanOutActionConfig | None = None,
         turn_counter: TurnCounter = _default_turn_counter,
         cap_message: str = "Fan-out cap reached: {turns} of {max_turns} model turns used.",
         denial_message: DenialFormatter = "Agent halted by Cycles policy: {reason}",
@@ -76,6 +78,11 @@ class CyclesFanOutGate(AgentMiddleware):
             raise ValueError("max_turns must be >= 1")
         if client is not None and (subject is None or action is None):
             raise ValueError("subject and action are required when a Cycles client is provided.")
+        if isinstance(action, Mapping):
+            raise TypeError(
+                "CyclesFanOutGate.action does not support per-tool Mapping — it gates model turns, "
+                "not tool calls. Pass a single Action or a Callable[[state], Action]."
+            )
         self._max_turns = max_turns
         self._client = client
         self._subject = subject

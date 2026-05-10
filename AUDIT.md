@@ -100,16 +100,23 @@ Commit/release failures are logged and swallowed (the tool result must not be ma
 
 ## Test coverage
 
-- 57 tests across `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py`, `tests/test_fanout.py`, `tests/test_fanout_async.py`.
-- Coverage 98.85% (gate `fail_under = 95` per `pyproject.toml`).
+- 68 tests across:
+  - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths
+  - `tests/test_fanout.py`, `tests/test_fanout_async.py` — sync + async fan-out paths
+  - `tests/test_examples.py` — import smoke for bundled examples
+  - `tests/integration/test_live_agent.py` — `create_agent` construction with our middleware against a `FakeMessagesListChatModel`, verifying the AgentMiddleware contract is satisfied at runtime
+- Coverage 99.26% (gate `fail_under = 95` per `pyproject.toml`).
 - Both sync (`.invoke()`) and async (`.ainvoke()`) paths exercised.
 - Mocking is done at the SDK boundary (`CyclesClient.decide`, etc.) so tests are independent of HTTP transport.
+- Idempotency-key shape (`<prefix>-<tool_call_id>-<8-hex>`) and reserve-mode commit amount (`actual=estimate`) are explicitly asserted to prevent silent contract drift.
 
 ## Known limitations (v0.1)
 
-- **Reserve mode commits at estimate**, not at actual usage. Tool-level cost instrumentation is left to the caller. A future revision may expose a `cost_fn` analogous to `stream_reservation`.
+- **Reserve mode commits at estimate**, not at actual usage. Tool-level cost instrumentation is left to the caller. A future revision may expose a `cost_fn` analogous to `stream_reservation`. Locked down by `tests/test_tool_gate.py::test_commit_called_with_configured_estimate`.
 - **No streaming-LLM cost integration yet.** For per-LLM-call streaming budget tracking with token-level commits, use the existing `runcycles.stream_reservation` from inside an LLM-spend handler; future revisions will wire `wrap_model_call` to this directly.
 - **Single tenant per middleware instance** unless you supply a `SubjectExtractor` callable. Per-call subject resolution is fully supported via the callable form; only the static-Subject convenience is single-tenant.
+- **Synthetic `tool_call_id` when missing.** A `ToolCallRequest` with no `id` field has its denial `ToolMessage` correlated via a fabricated `missing-<12-hex>` id, with a warning logged at `langchain_runcycles._internal`. Conformant LangChain runtimes always supply `id`; this fallback exists so a malformed upstream doesn't silently break tool-call/response correlation. Locked down by `tests/test_tool_gate.py::test_synthetic_tool_call_id_when_missing`.
+- **Fan-out gate rejects per-tool action mappings.** `CyclesFanOutGate` gates *model turns*, not tool calls; a per-tool-name `Mapping` for `action` is meaningless there and is rejected at construction with `TypeError`. Locked down by `tests/test_fanout.py::test_fanout_rejects_mapping_action`.
 
 ## Update protocol
 

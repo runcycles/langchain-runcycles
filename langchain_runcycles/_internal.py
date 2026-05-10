@@ -2,13 +2,39 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from runcycles import Action, CyclesResponse, Decision, DecisionResponse, Subject
+from runcycles import Action, Amount, CyclesResponse, DecisionResponse, Subject, Unit
 
 from langchain_runcycles._config import ActionConfig, DenialFormatter, SubjectConfig
+
+logger = logging.getLogger(__name__)
+
+# Conservative default — $0.0001. Tool gates in `decide` mode use this only as a
+# preflight estimate (no money moves). Tool gates in `reserve` / `decide+reserve`
+# modes both *reserve* and *commit* this exact amount; supply your own when you
+# care about per-tool cost accuracy.
+_DEFAULT_ESTIMATE = Amount(unit=Unit.USD_MICROCENTS, amount=10_000)
+
+
+def coerce_tool_call_id(raw: str | None) -> str:
+    """Return a non-empty tool_call_id. Fabricates one when the request lacks it.
+
+    LangChain correlates tool calls and tool messages by id; an empty id silently
+    breaks correlation. We synthesize a clearly-labeled id and log a warning so
+    a curious user can grep their logs for upstream malformed requests.
+    """
+    if raw:
+        return raw
+    fabricated = f"missing-{uuid.uuid4().hex[:12]}"
+    logger.warning(
+        "ToolCallRequest had no 'id'; synthesized tool_call_id=%s for ToolMessage correlation.",
+        fabricated,
+    )
+    return fabricated
 
 
 def resolve_subject(config: SubjectConfig, request: Any, state: Any) -> Subject:
@@ -99,6 +125,8 @@ def get_state(request: Any) -> Any:
 
 
 __all__ = [
+    "_DEFAULT_ESTIMATE",
+    "coerce_tool_call_id",
     "denial_reason",
     "format_denial",
     "get_state",
@@ -108,5 +136,4 @@ __all__ = [
     "parse_decision",
     "resolve_action",
     "resolve_subject",
-    "Decision",
 ]

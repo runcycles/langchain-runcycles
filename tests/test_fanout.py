@@ -142,3 +142,19 @@ def test_decide_allow_below_cap(sync_client: CyclesClient, subject: Any, action:
     gate = CyclesFanOutGate(5, client=sync_client, subject=subject, action=action)
     state = {"messages": [AIMessage(content="hi")]}
     assert gate.before_model(state) is None
+
+
+def test_fanout_rejects_mapping_action(sync_client: CyclesClient, subject: Any) -> None:
+    """A per-tool-name Mapping makes no sense for fan-out (which gates model turns,
+    not tool calls). Reject at construction with a clear error rather than at the
+    first model turn."""
+    from runcycles import Action
+
+    mapping = {"some_tool": Action(kind="tool.call", name="some_tool")}
+    with pytest.raises(TypeError, match="does not support per-tool Mapping"):
+        CyclesFanOutGate(
+            5,
+            client=sync_client,
+            subject=subject,
+            action=mapping,  # type: ignore[arg-type]
+        )

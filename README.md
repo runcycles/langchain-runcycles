@@ -166,6 +166,13 @@ await agent.ainvoke({"messages": [...]})
 - [`examples/tenant_budget_agent.py`](examples/tenant_budget_agent.py) — single-tenant budget gate with risky-tool denial recovery.
 - [`examples/multi_agent_fanout.py`](examples/multi_agent_fanout.py) — multi-agent / HITL flow with `CyclesToolGate` + `CyclesFanOutGate` + `HumanInTheLoopMiddleware`.
 
+## Known limitations (v0.1)
+
+- **Reserve mode commits at the configured `estimate`, not actual usage.** `mode="reserve"` and `mode="decide+reserve"` reserve the estimate, run the tool, then commit *the same amount* on success. Per-tool actual-cost instrumentation (analogous to `runcycles.stream_reservation`'s `cost_fn`) is on the roadmap. Until then, set `estimate` to the worst-case spend per call you're willing to debit, or use `mode="decide"` if you only want policy gating without budget movement.
+- **No streaming-LLM cost integration yet.** `wrap_model_call` is not implemented in v0.1; for token-level streaming budget tracking, use `runcycles.stream_reservation` directly inside an LLM-spend handler.
+- **Per-call subject only via the extractor form.** Static `Subject` plays one tenant per middleware instance. For per-tenant/per-agent routing in a multi-tenant deployment, supply a `SubjectExtractor` callable.
+- **Synthetic `tool_call_id` when missing.** If a `ToolCallRequest` arrives without an `id`, the middleware fabricates `missing-<hex>` for the `ToolMessage` and logs a warning. Correct LangChain runtimes always supply `id`; this is a defensive fallback.
+
 ## Development
 
 ```bash
