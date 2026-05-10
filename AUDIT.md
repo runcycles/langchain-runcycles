@@ -1,8 +1,8 @@
 # langchain-runcycles — Middleware API Conformance Audit
 
 **Date:** 2026-05-10
-**Package:** `langchain-runcycles` v0.1.2
-**LangChain target:** `langchain >= 1.0, < 2.0`, `langchain-core >= 1.0, < 2.0` (tested against `langchain==1.2.18`, `langchain-core==1.3.3`, `langgraph==1.1.10`)
+**Package:** `langchain-runcycles` v0.1.0
+**LangChain target:** `langchain >= 1.0, < 2.0` (tested against `langchain==1.2.18`, `langchain-core==1.3.3`, `langgraph==1.1.10`)
 **Cycles SDK target:** `runcycles >= 0.4.1` (tested against `runcycles==0.4.1`, Python 3.10+)
 **Server audit:** Cycles protocol conformance is owned by [`cycles-client-python/AUDIT.md`](https://github.com/runcycles/cycles-client-python/blob/main/AUDIT.md). This document audits this package's contract with the LangChain agent middleware API only.
 
@@ -18,7 +18,7 @@
 | SDK methods consumed | 5/5 | 0 |
 | Idempotency-key generation | — | 0 |
 | Reservation lifecycle (reserve → commit/release) | — | 0 |
-| Test coverage gate | ≥95% | 0 (99.30%) |
+| Test coverage gate | ≥95% | 0 (98.85%) |
 
 **Overall: middleware contract is in conformance with the LangChain 1.x API as documented at <https://docs.langchain.com/oss/python/langchain/middleware/custom>.**
 
@@ -58,7 +58,7 @@ Compared the following across LangChain documentation and this package's source:
 ToolMessage(content=<denial-string>, tool_call_id=<request.tool_call['id']>)
 ```
 
-`tool_call_id` is required by LangChain; we pass through the original id from `request.tool_call`. If the upstream omits `id`, `coerce_tool_call_id` synthesizes `missing-<12-hex>` and logs a warning (see `_internal.py`); the synthesized id is fresh per call, so the resulting idempotency-key path is *not* retry-stable on this fallback.
+`tool_call_id` is required by LangChain; we pass through the original tool-call id from `request.tool_call`. If the request lacks an id (defensive case), an empty string is used and the LangChain runtime surfaces the denial without correlation.
 
 ## SDK methods consumed
 
@@ -75,17 +75,17 @@ Type model imports from `runcycles`:
 
 ## Idempotency keys
 
-Idempotency keys are deterministic per `tool_call_id` (v0.1.2+). When the upstream supplies a tool-call id, the key is `{prefix}-{tool_call_id}` with no random suffix — so a duplicate dispatch (durable workflow replay, middleware retry, process recovery) lands on the *same* Cycles reservation rather than creating a second one. UUID fallback is used only when no stable upstream id is available.
+Each Cycles request gets a unique idempotency key derived from a short prefix plus a UUID hex suffix. When a tool-call id is available, it is included in the key for traceability:
 
 | Operation | Key shape |
 |---|---|
-| `decide` | `decide-{tool_call_id}` (or `decide-{32-hex}` fallback) |
-| `create_reservation` | `res-{tool_call_id}` (or `res-{32-hex}` fallback) |
-| `commit_reservation` | `commit-{reservation-key}` (key from create) |
-| `release_reservation` | `release-{reservation-key}` (key from create) |
-| `decide` (fanout) | `fanout-decide-{32-hex}` (no per-call upstream id available) |
+| `decide` | `decide-<tool_call_id>-<8-hex>` or `decide-<32-hex>` |
+| `create_reservation` | `res-<tool_call_id>-<8-hex>` or `res-<32-hex>` |
+| `commit_reservation` | `commit-<reservation-key>` (key from create) |
+| `release_reservation` | `release-<reservation-key>` (key from create) |
+| `decide` (fanout) | `fanout-decide-<32-hex>` |
 
-Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic_per_tool_call_id` and `::test_idempotency_key_retry_lands_on_same_key`.
+This matches the parent SDK's idempotency-key conventions.
 
 ## Reservation lifecycle
 
@@ -93,10 +93,10 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 
 1. Pre-call: `create_reservation` → if not success or no `reservation_id`, return `ToolMessage` denial.
 2. Run handler.
-3. Success: `commit_reservation` (commits at the configured `estimate`; tool-level actual-cost instrumentation is left to the caller for v0.1.x).
+3. Success: `commit_reservation` (commits at the configured `estimate`; tool-level actual-cost instrumentation is left to the caller for v0.1).
 4. Exception: `release_reservation`, then re-raise.
 
-**Settlement-failure handling** (v0.1.2+): if the success-path `commit_reservation` itself raises, behavior is governed by `settlement_error_policy` on `CyclesToolGate` — default `"raise"` propagates the commit exception so the caller can reconcile (strict governance); opt-in `"log"` swallows the failure and returns the tool result (best-effort accounting; reservation expires via TTL). The release path on tool-side exception always logs and continues so the original tool exception wins.
+Commit/release failures are logged and swallowed (the tool result must not be masked by a Cycles bookkeeping error).
 
 ## Test coverage
 
