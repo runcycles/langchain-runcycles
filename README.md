@@ -151,12 +151,11 @@ gate = CyclesToolGate(
     idempotency_namespace="run_2026_05_10_abc",
 )
 
-# Callable — receives the LangChain ToolCallRequest. Pull the namespace from
-# wherever your runtime exposes the run id (a contextvar, your own middleware,
-# request metadata, etc.). The exact accessor depends on your LangChain version.
-def my_run_id(_request):
-    # In production: return your_runtime.current_run_id()
-    return current_run_id_contextvar.get("default")
+# Callable — receives the LangChain ToolCallRequest. Pull the run id from
+# wherever your runtime carries it: request state, a contextvar, your own
+# middleware, etc.
+def my_run_id(request):
+    return request.state["run_id"]
 
 gate = CyclesToolGate(
     client,
@@ -262,7 +261,7 @@ mypy langchain_runcycles
 - Python 3.10+
 - `runcycles >= 0.4.1`
 - `langchain >= 1.0, < 2.0`
-- `langchain-core >= 0.3`
+- `langchain-core >= 1.0, < 2.0`
 
 ## License
 

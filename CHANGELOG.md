@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-05-10
+
+External review of v0.1.3 caught two real defects (stale README dep line, type alias narrower than the documented per-call opt-out) plus a docs-example issue (undefined helper in a runnable-looking snippet). All fixed; no functional change.
+
+### Fixed
+
+- **Stale `langchain-core >= 0.3` line in README's Requirements section.** `pyproject.toml` was correctly tightened to `>=1.0,<2.0` in v0.1.2 but the README wasn't updated at the time. Now consistent.
+- **`IdempotencyNamespaceResolver` type alias widened from `Callable[[Any], str]` to `Callable[[Any], str | None]`.** Runtime already supported a callable returning `None` (per-call opt-out, documented since v0.1.3 and tested by `test_callable_namespace_returning_none_opts_out_per_call`). The type signature was narrower than the documented contract; strict-mypy users would have hit a false negative when writing the documented opt-out callable. No behavior change.
+- **Docs idempotency-namespace example now uses `request.state["run_id"]`** instead of an undefined `current_run_id()` / `current_run_id_contextvar.get(...)` helper. The new form is runnable against a real LangChain `ToolCallRequest` and matches the LangChain idiom for accessing per-call state. README, `docs/runcycles.mdx`, and the langchain-ai/docs PR mirror all updated together.
+
+### Behavior change
+
+None. Type widening is permissive (the old narrower type was a strict subset of the new one), README and docs are user-facing prose. v0.1.3 callers' code keeps working unchanged.
+
 ## [0.1.3] - 2026-05-10
 
 Adds run / workflow / tenant scoping to Cycles idempotency keys, addressing the v0.1.2 review concern about cross-run collision when frameworks reuse short tool call ids like `tc_1`. Backward-compatible — keys without a configured namespace keep the v0.1.2 shape exactly. Closes #6.
@@ -71,6 +85,7 @@ Initial public release. First-class LangChain agent middleware integration for C
 - Examples: `tenant_budget_agent.py` (tenant cap + risky-tool denial) and `multi_agent_fanout.py` (multi-agent / HITL flow).
 - `AUDIT.md` documenting LangChain middleware API conformance (hooks, ToolMessage shape, jump_to semantics, SDK methods consumed).
 
+[0.1.4]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.0...v0.1.1
