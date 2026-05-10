@@ -405,6 +405,112 @@ def test_invalid_settlement_policy_raises(sync_client: CyclesClient, subject: An
         )
 
 
+# --- v0.1.3 idempotency namespace tests -------------------------------------------
+
+
+def test_make_idempotency_key_with_namespace_and_suffix() -> None:
+    from langchain_runcycles._internal import make_idempotency_key
+
+    assert make_idempotency_key("res", "tc_1", namespace="run_abc") == "res-run_abc-tc_1"
+
+
+def test_make_idempotency_key_namespace_without_suffix_uses_uuid() -> None:
+    """Run-scoped fan-out style: namespace present, suffix None → UUID fills the call slot."""
+    import re
+
+    from langchain_runcycles._internal import make_idempotency_key
+
+    key = make_idempotency_key("fanout-decide", namespace="run_abc")
+    assert re.match(r"^fanout-decide-run_abc-[0-9a-f]{32}$", key)
+
+
+def test_make_idempotency_key_no_namespace_keeps_v012_shape() -> None:
+    """v0.1.2 backward compatibility: omitting namespace gives the v0.1.2 shape unchanged."""
+    from langchain_runcycles._internal import make_idempotency_key
+
+    assert make_idempotency_key("res", "tc_1") == "res-tc_1"
+
+
+def test_idempotency_namespace_as_static_string(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Static-string namespace is woven into every Cycles key for the tool gate."""
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="decide+reserve",
+        idempotency_namespace="run_abc",
+    )
+    gate.wrap_tool_call(tool_call_request, lambda r: "ok")
+
+    decide_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    reserve_key = sync_client.create_reservation.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    commit_key = sync_client.commit_reservation.call_args[0][1].idempotency_key  # type: ignore[attr-defined]
+
+    assert decide_key == "decide-run_abc-tc_1"
+    assert reserve_key == "res-run_abc-tc_1"
+    assert commit_key == f"commit-{reserve_key}"
+
+
+def test_idempotency_namespace_as_callable(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Callable namespace is evaluated per call with the request as argument."""
+    captured: list[Any] = []
+
+    def derive(request: Any) -> str:
+        captured.append(request)
+        return "run_xyz"
+
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="decide",
+        idempotency_namespace=derive,
+    )
+    gate.wrap_tool_call(tool_call_request, lambda r: "ok")
+
+    assert captured == [tool_call_request]
+    decide_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    assert decide_key == "decide-run_xyz-tc_1"
+
+
+def test_no_namespace_preserves_v012_key_shape(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Backward-compat regression: without idempotency_namespace, keys match v0.1.2 exactly."""
+    gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="decide")
+    gate.wrap_tool_call(tool_call_request, lambda r: "ok")
+    decide_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    assert decide_key == "decide-tc_1"
+
+
+def test_namespace_prevents_cross_run_collision(
+    sync_client: CyclesClient, subject: Any, action: Any
+) -> None:
+    """Same tool_call_id under different namespaces produces different keys.
+
+    This is the failure mode the namespace exists to prevent: two runs that both
+    use a short, framework-generated tool_call_id like 'tc_1' would otherwise
+    collide on the same Cycles reservation.
+    """
+    gate_run_a = CyclesToolGate(
+        sync_client, subject=subject, action=action, mode="decide", idempotency_namespace="run_a"
+    )
+    gate_run_b = CyclesToolGate(
+        sync_client, subject=subject, action=action, mode="decide", idempotency_namespace="run_b"
+    )
+    gate_run_a.wrap_tool_call(FakeToolCallRequest(call_id="tc_1"), lambda r: "ok")
+    key_a = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    gate_run_b.wrap_tool_call(FakeToolCallRequest(call_id="tc_1"), lambda r: "ok")
+    key_b = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    assert key_a == "decide-run_a-tc_1"
+    assert key_b == "decide-run_b-tc_1"
+    assert key_a != key_b
+
+
 # --- helper: a tiny capturer scoped to a logger -----------------------------------
 
 

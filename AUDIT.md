@@ -1,7 +1,7 @@
 # langchain-runcycles — Middleware API Conformance Audit
 
 **Date:** 2026-05-10
-**Package:** `langchain-runcycles` v0.1.2
+**Package:** `langchain-runcycles` v0.1.3
 **LangChain target:** `langchain >= 1.0, < 2.0`, `langchain-core >= 1.0, < 2.0` (tested against `langchain==1.2.18`, `langchain-core==1.3.3`, `langgraph==1.1.10`)
 **Cycles SDK target:** `runcycles >= 0.4.1` (tested against `runcycles==0.4.1`, Python 3.10+)
 **Server audit:** Cycles protocol conformance is owned by [`cycles-client-python/AUDIT.md`](https://github.com/runcycles/cycles-client-python/blob/main/AUDIT.md). This document audits this package's contract with the LangChain agent middleware API only.
@@ -75,17 +75,30 @@ Type model imports from `runcycles`:
 
 ## Idempotency keys
 
-Idempotency keys are deterministic per `tool_call_id` (v0.1.2+). When the upstream supplies a tool-call id, the key is `{prefix}-{tool_call_id}` with no random suffix — so a duplicate dispatch (durable workflow replay, middleware retry, process recovery) lands on the *same* Cycles reservation rather than creating a second one. UUID fallback is used only when no stable upstream id is available.
+Idempotency keys are deterministic per `tool_call_id` (v0.1.2+) and may optionally be scoped by a `namespace` (v0.1.3+) to prevent cross-run collisions when frameworks reuse short tool-call ids like `tc_1`.
 
-| Operation | Key shape |
+Key shape, in order of preference:
+
+| `namespace` | `tool_call_id` | Resulting key |
+|---|---|---|
+| set | set | `{prefix}-{namespace}-{tool_call_id}` (most specific; v0.1.3+) |
+| unset | set | `{prefix}-{tool_call_id}` (v0.1.2 shape, retained for back-compat) |
+| set | unset | `{prefix}-{namespace}-{32-hex}` (run-scoped, per-call random) |
+| unset | unset | `{prefix}-{32-hex}` (last-resort fallback) |
+
+Per-operation prefixes (unchanged):
+
+| Operation | Prefix |
 |---|---|
-| `decide` | `decide-{tool_call_id}` (or `decide-{32-hex}` fallback) |
-| `create_reservation` | `res-{tool_call_id}` (or `res-{32-hex}` fallback) |
-| `commit_reservation` | `commit-{reservation-key}` (key from create) |
-| `release_reservation` | `release-{reservation-key}` (key from create) |
-| `decide` (fanout) | `fanout-decide-{32-hex}` (no per-call upstream id available) |
+| `decide` (tool gate) | `decide` |
+| `create_reservation` | `res` |
+| `commit_reservation` | `commit-{reservation-key}` (composed from create) |
+| `release_reservation` | `release-{reservation-key}` (composed from create) |
+| `decide` (fanout) | `fanout-decide` |
 
-Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic_per_tool_call_id` and `::test_idempotency_key_retry_lands_on_same_key`.
+`namespace` is configured via `idempotency_namespace` on `CyclesToolGate` / `CyclesFanOutGate` — accepts a static string or a callable. The callable receives the request (tool gate) or state (fan-out gate) so users can extract a workflow run id, tenant id, etc. per call.
+
+Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic_per_tool_call_id`, `::test_idempotency_key_retry_lands_on_same_key`, `::test_make_idempotency_key_with_namespace_and_suffix`, `::test_idempotency_namespace_as_static_string`, `::test_idempotency_namespace_as_callable`, `::test_namespace_prevents_cross_run_collision`, plus `tests/test_fanout.py::test_fanout_idempotency_namespace_callable_from_state` and async siblings.
 
 ## Reservation lifecycle
 
@@ -100,9 +113,9 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 
 ## Test coverage
 
-- 74 tests across:
-  - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log + idempotency-key determinism)
-  - `tests/test_fanout.py`, `tests/test_fanout_async.py` — sync + async fan-out paths
+- 85 tests across:
+  - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log, idempotency-key determinism, and v0.1.3 namespace static/callable/no-namespace/cross-run-collision)
+  - `tests/test_fanout.py`, `tests/test_fanout_async.py` — sync + async fan-out paths (including state-derived idempotency namespace)
   - `tests/test_examples.py` — import smoke for bundled examples
   - `tests/integration/test_live_agent.py` — `create_agent` construction with our middleware against a `FakeMessagesListChatModel`, verifying the AgentMiddleware contract is satisfied at runtime
 - Coverage ≥99% (gate `fail_under = 95` per `pyproject.toml`).

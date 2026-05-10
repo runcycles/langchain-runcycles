@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-05-10
+
+Adds run / workflow / tenant scoping to Cycles idempotency keys, addressing the v0.1.2 review concern about cross-run collision when frameworks reuse short tool call ids like `tc_1`. Backward-compatible — keys without a configured namespace keep the v0.1.2 shape exactly. Closes #6.
+
+### Added
+
+- **`idempotency_namespace` config on `CyclesToolGate` and `CyclesFanOutGate`.** Optional `str | Callable[[Any], str]`. When supplied, every Cycles idempotency key becomes `{prefix}-{namespace}-{tool_call_id}` (or `{prefix}-{namespace}-{32-hex}` in the fanout case where there's no per-call upstream id). The callable form receives the LangChain `ToolCallRequest` for tool gates and the agent `state` for fan-out gates — useful for extracting a workflow run id, tenant id, or other run-scoped context.
+- **`make_idempotency_key` now accepts a `namespace` keyword-only argument.** Same shape semantics as the middleware-level config; useful when calling the helper directly from custom integrations.
+- **Public type aliases** `IdempotencyNamespace` and `IdempotencyNamespaceResolver` re-exported from the package root for users typing their config callables.
+
+### Changed
+
+- **AUDIT.md idempotency-key section** updated with the new four-shape table (namespace+suffix, suffix only, namespace only, neither) and cross-references to the namespace tests.
+- **README** gains an "Idempotency-key namespacing" subsection under Configuration showing static and callable forms with a practical run-id example.
+- **MDX Production notes** mirrors the README addition (will land via the same content sync that keeps the langchain-ai/docs PR in step).
+
+### Backward compatibility
+
+No behavior change for users not setting `idempotency_namespace`. Locked down by `tests/test_tool_gate.py::test_no_namespace_preserves_v012_key_shape`. New tests covering static, callable, fanout-state-derived, and cross-run-collision-prevention paths bring the suite to 85 tests, ≥99% coverage.
+
 ## [0.1.2] - 2026-05-10
 
 Credibility patch addressing external review feedback. Three real correctness/copy issues that landed in the v0.1.0/v0.1.1 cuts; nothing is co-marketed before these are fixed.
@@ -51,6 +71,7 @@ Initial public release. First-class LangChain agent middleware integration for C
 - Examples: `tenant_budget_agent.py` (tenant cap + risky-tool denial) and `multi_agent_fanout.py` (multi-agent / HITL flow).
 - `AUDIT.md` documenting LangChain middleware API conformance (hooks, ToolMessage shape, jump_to semantics, SDK methods consumed).
 
+[0.1.3]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/runcycles/langchain-runcycles/releases/tag/v0.1.0

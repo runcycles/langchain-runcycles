@@ -158,3 +158,47 @@ def test_fanout_rejects_mapping_action(sync_client: CyclesClient, subject: Any) 
             subject=subject,
             action=mapping,  # type: ignore[arg-type]
         )
+
+
+def test_fanout_idempotency_namespace_static(sync_client: CyclesClient, subject: Any, action: Any) -> None:
+    """Static-string namespace flows into fanout-decide keys."""
+    import re
+
+    gate = CyclesFanOutGate(
+        10,
+        client=sync_client,
+        subject=subject,
+        action=action,
+        idempotency_namespace="static_run",
+    )
+    gate.before_model({"messages": [AIMessage(content="t1")]})
+    fanout_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    assert re.match(r"^fanout-decide-static_run-[0-9a-f]{32}$", fanout_key)
+
+
+def test_fanout_idempotency_namespace_callable_from_state(
+    sync_client: CyclesClient, subject: Any, action: Any
+) -> None:
+    """Callable namespace receives the agent state — useful for run-id extraction."""
+    import re
+
+    captured: list[Any] = []
+
+    def derive(state: Any) -> str:
+        captured.append(state)
+        return state["config"]["run_id"]
+
+    gate = CyclesFanOutGate(
+        10,
+        client=sync_client,
+        subject=subject,
+        action=action,
+        idempotency_namespace=derive,
+    )
+    state = {"messages": [AIMessage(content="t1")], "config": {"run_id": "run_xyz"}}
+    gate.before_model(state)
+
+    assert captured == [state]
+    fanout_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    # fan-out has no tool_call_id, so the call slot is UUID; we assert the namespace prefix
+    assert re.match(r"^fanout-decide-run_xyz-[0-9a-f]{32}$", fanout_key)

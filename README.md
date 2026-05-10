@@ -138,6 +138,33 @@ def derive(request):
     return Action(kind="tool.call", name=request.tool_call["name"])
 ```
 
+### Idempotency-key namespacing (v0.1.3+)
+
+Cycles idempotency keys default to `{prefix}-{tool_call_id}` — deterministic per tool call so retries land on the same reservation. If your runtime can reuse short tool-call ids across runs (`tc_1`, `tc_2`, ...), set `idempotency_namespace` on the middleware to scope keys by run / workflow / tenant. Keys then become `{prefix}-{namespace}-{tool_call_id}`.
+
+```python
+# Static — same namespace every call
+gate = CyclesToolGate(
+    client,
+    subject=Subject(tenant="acme"),
+    action=Action(kind="tool.call", name="send_email"),
+    idempotency_namespace="run_2026_05_10_abc",
+)
+
+# Callable — extract per-call from request or state
+def run_id_from_request(request):
+    return request.state["config"]["run_id"]
+
+gate = CyclesToolGate(
+    client,
+    subject=Subject(tenant="acme"),
+    action=Action(kind="tool.call", name="send_email"),
+    idempotency_namespace=run_id_from_request,
+)
+```
+
+`CyclesFanOutGate.idempotency_namespace` is the same shape; the callable receives the agent `state` instead of the tool-call request. Without `idempotency_namespace`, keys keep the v0.1.2 shape exactly — no behavior change.
+
 ### Denial messages
 
 `denial_message` accepts a format string (placeholders: `{reason}`, `{tool}`, `{decision}`) or a callable receiving the `CyclesResponse`:

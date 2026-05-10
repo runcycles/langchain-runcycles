@@ -99,22 +99,39 @@ def format_denial(formatter: DenialFormatter, response: CyclesResponse, tool_nam
     )
 
 
-def make_idempotency_key(prefix: str, suffix: str | None = None) -> str:
+def make_idempotency_key(
+    prefix: str,
+    suffix: str | None = None,
+    *,
+    namespace: str | None = None,
+) -> str:
     """Build an idempotency key. Deterministic when ``suffix`` is provided.
 
     When ``suffix`` (typically a LangChain ``tool_call_id``) is supplied, the
-    returned key is ``{prefix}-{suffix}`` — same call gets the same key, so
-    retries land on the same Cycles reservation rather than creating
-    duplicates. This is the failure mode Cycles is built to prevent.
+    returned key includes it verbatim so retries land on the same Cycles
+    reservation rather than creating duplicates. This is the failure mode
+    Cycles is built to prevent.
 
-    A fresh UUID is used only as a last-resort fallback when no stable
-    upstream identifier is available (e.g. the upstream omitted the tool
-    call id and ``coerce_tool_call_id`` had to synthesize one — that
-    synthesized id is itself fresh per call).
+    Optional ``namespace`` (v0.1.3+) is woven in between prefix and suffix to
+    scope keys by run / workflow / tenant — useful when frameworks reuse short
+    tool call ids like ``tc_1`` across runs and a bare ``{prefix}-{tool_call_id}``
+    could collide.
+
+    Key shapes (in order of preference):
+
+    * ``namespace`` + ``suffix``  → ``{prefix}-{namespace}-{suffix}`` (most specific)
+    * ``suffix`` only             → ``{prefix}-{suffix}`` (v0.1.2 shape, retained for back-compat)
+    * ``namespace`` only          → ``{prefix}-{namespace}-{32-hex}`` (run-scoped, per-call random)
+    * neither                     → ``{prefix}-{32-hex}`` (last-resort fallback)
     """
+    parts: list[str] = [prefix]
+    if namespace:
+        parts.append(namespace)
     if suffix:
-        return f"{prefix}-{suffix}"
-    return f"{prefix}-{uuid.uuid4().hex}"
+        parts.append(suffix)
+    else:
+        parts.append(uuid.uuid4().hex)
+    return "-".join(parts)
 
 
 def get_tool_call(request: Any) -> dict[str, Any]:
