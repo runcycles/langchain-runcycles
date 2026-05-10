@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langchain-runcycles"
-version = "0.1.1"
+version = "0.1.2"
 description = "LangChain agent middleware for Cycles — pre-tool-call authorization, fan-out caps, and per-tenant budget enforcement for Python agents using create_agent."
 readme = "README.md"
 license = "Apache-2.0"
@@ -51,7 +51,10 @@ classifiers = [
 dependencies = [
     "runcycles>=0.4.1",
     "langchain>=1.0,<2.0",
-    "langchain-core>=0.3",
+    # Tightened from `>=0.3` per external review — langchain 1.x always pulls
+    # langchain-core 1.x transitively; pinning this explicitly avoids a stale
+    # 0.x landing accidentally in mixed environments.
+    "langchain-core>=1.0,<2.0",
 ]
 
 [project.urls]

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-05-10
+
+Credibility patch addressing external review feedback. Three real correctness/copy issues that landed in the v0.1.0/v0.1.1 cuts; nothing is co-marketed before these are fixed.
+
+### Changed
+
+- **README copy: removed `wrap_model_call` overclaim.** Earlier copy listed `wrap_model_call` alongside the implemented hooks and said the package runs "before LLM calls or tool actions execute" — but `wrap_model_call` is not implemented in v0.1.x. The README now accurately scopes coverage to `wrap_tool_call` (tool-call authorization) and `before_model` (fan-out caps), with an explicit note that model-call middleware is on the roadmap.
+- **Brand: title and copy use "Cycles", not "Runcycles".** "Cycles" is the product; `runcycles` is just the domain. H1 changed from `LangChain Runcycles — ...` to `Cycles for LangChain — AI agent middleware for budget and action authority`. Same fix in `docs/runcycles.mdx` (title `Cycles middleware integration`).
+- **Copy: dropped the "Works with LangGraph, LangSmith, OpenAI, Anthropic, MCP servers..." framework name-drop.** Replaced with `Provider-neutral: works with any LangChain 1.x agent regardless of model provider, as long as actions flow through LangChain middleware/tool execution.` More accurate for a middleware package that's truly model-agnostic at this layer.
+- **Tightened `langchain-core` dep** from `>=0.3` to `>=1.0,<2.0` per review feedback. `langchain >=1.0,<2.0` already pulls `langchain-core 1.x` transitively; the explicit pin avoids a stale 0.x landing accidentally in mixed environments.
+- **Settlement docs: added a retry-duplicate-side-effect callout.** When `settlement_error_policy="raise"` propagates the commit failure, a LangChain agent may retry — at which point the tool's side effect (email, payment, write) repeats. README and the MDX Production-notes section now flag this so users can choose `"log"` deliberately for non-idempotent tool side effects.
+
+### Fixed
+
+- **Idempotency keys are now deterministic per `tool_call_id`.** Previous shape was `{prefix}-{tool_call_id}-{8-hex-uuid}`, which made every retry of the same tool call land on a *new* Cycles reservation — defeating the point of idempotency. New shape is `{prefix}-{tool_call_id}` so a duplicate dispatch (durable workflow replay, middleware retry, process recovery) lands on the same reservation. Random UUIDs are used only as a last-resort fallback when the upstream omits `tool_call_id`. Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic_per_tool_call_id` and `::test_idempotency_key_retry_lands_on_same_key`.
+
+### Added
+
+- **`settlement_error_policy` config on `CyclesToolGate`.** New `Literal["raise", "log"]` parameter controlling what happens if the post-tool-run `commit_reservation` call itself fails. New default `"raise"` propagates the commit failure so the caller can reconcile (governance-first); the previous v0.1.0/v0.1.1 behavior is opt-in via `"log"`. Documented tradeoff in README "Settlement (commit) failures" subsection. Tests: `test_settlement_raise_default_propagates_commit_failure`, `test_settlement_log_swallows_commit_failure`, plus async siblings and `test_invalid_settlement_policy_raises`.
+
+### Behavior change (minor)
+
+`settlement_error_policy` defaults to `"raise"`. Users on v0.1.0/v0.1.1 who relied on the swallowed-commit-failure behavior should explicitly pass `settlement_error_policy="log"`. Default chosen because for a *governance* package, silently dropping accounting on commit failure is more dangerous than surfacing the error.
+
 ## [0.1.1] - 2026-05-10
 
 Discovery / SEO refresh. No code changes; metadata-only release that aligns the package's PyPI listing and README with the parent SDK (`cycles-client-python`) for category-search and ecosystem discovery.
@@ -27,5 +51,6 @@ Initial public release. First-class LangChain agent middleware integration for C
 - Examples: `tenant_budget_agent.py` (tenant cap + risky-tool denial) and `multi_agent_fanout.py` (multi-agent / HITL flow).
 - `AUDIT.md` documenting LangChain middleware API conformance (hooks, ToolMessage shape, jump_to semantics, SDK methods consumed).
 
+[0.1.2]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/runcycles/langchain-runcycles/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/runcycles/langchain-runcycles/releases/tag/v0.1.0

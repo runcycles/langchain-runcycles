@@ -298,29 +298,43 @@ def test_commit_called_with_configured_estimate(
     assert commit_request.actual == custom_estimate
 
 
-def test_idempotency_key_format_is_stable(
+def test_idempotency_keys_are_deterministic_per_tool_call_id(
     sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
 ) -> None:
-    """Idempotency keys follow the documented shape: <prefix>-<tool_call_id>-<8-hex>.
+    """Idempotency keys are deterministic when tool_call_id is supplied.
 
-    The publish workflow's release-notes extractor and the parent SDK both depend on
-    this convention. Locking it down with a regex test prevents silent drift.
+    Shape: ``<prefix>-<tool_call_id>``. Same tool_call_id MUST produce the same
+    key on retry so the Cycles server treats it as one reservation, not two.
+    The parent SDK and the publish workflow both depend on this convention.
     """
-    import re
-
     gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="decide+reserve")
     gate.wrap_tool_call(tool_call_request, lambda r: "ok")
 
     decide_args, _ = sync_client.decide.call_args  # type: ignore[attr-defined]
-    decide_key = decide_args[0].idempotency_key
-    assert re.match(r"^decide-tc_1-[0-9a-f]{8}$", decide_key)
+    assert decide_args[0].idempotency_key == "decide-tc_1"
 
     reserve_args, _ = sync_client.create_reservation.call_args  # type: ignore[attr-defined]
     reserve_key = reserve_args[0].idempotency_key
-    assert re.match(r"^res-tc_1-[0-9a-f]{8}$", reserve_key)
+    assert reserve_key == "res-tc_1"
 
     commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
     assert commit_args[1].idempotency_key == f"commit-{reserve_key}"
+
+
+def test_idempotency_key_retry_lands_on_same_key(
+    sync_client: CyclesClient, subject: Any, action: Any
+) -> None:
+    """Two `wrap_tool_call` invocations with the same tool_call_id produce the same key.
+
+    This is the core retry-stability property: a duplicated dispatch (e.g. by a durable
+    workflow runner replaying state) must NOT create a second reservation in Cycles.
+    """
+    gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="decide")
+    gate.wrap_tool_call(FakeToolCallRequest(call_id="abc-123"), lambda r: "ok")
+    first_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    gate.wrap_tool_call(FakeToolCallRequest(call_id="abc-123"), lambda r: "ok")
+    second_key = sync_client.decide.call_args[0][0].idempotency_key  # type: ignore[attr-defined]
+    assert first_key == second_key == "decide-abc-123"
 
 
 def test_synthetic_tool_call_id_when_missing(
@@ -349,6 +363,46 @@ def test_synthetic_tool_call_id_when_missing(
     # And a warning was emitted at least once
     warning_messages = [r for r in logs if r.levelno >= logging.WARNING]
     assert any("synthesized tool_call_id" in r.getMessage() for r in warning_messages)
+
+
+def test_settlement_raise_default_propagates_commit_failure(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Strict-governance default: when commit fails after a successful tool run, raise.
+
+    The tool already produced its side effect; silently dropping the bookkeeping
+    would let unaccounted spend through. Surfacing the exception forces the caller
+    to reconcile.
+    """
+    sync_client.commit_reservation.side_effect = RuntimeError("cycles unavailable")  # type: ignore[attr-defined]
+    gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="reserve")
+    with pytest.raises(RuntimeError, match="cycles unavailable"):
+        gate.wrap_tool_call(tool_call_request, lambda r: "tool ran")
+    sync_client.commit_reservation.assert_called_once()  # type: ignore[attr-defined]
+
+
+def test_settlement_log_swallows_commit_failure(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Opt-in `log` policy: commit failure is logged, tool result returned.
+
+    Matches the v0.1.0/v0.1.1 behavior for users who chose UX over strict accounting.
+    """
+    sync_client.commit_reservation.side_effect = RuntimeError("cycles unavailable")  # type: ignore[attr-defined]
+    gate = CyclesToolGate(
+        sync_client, subject=subject, action=action, mode="reserve", settlement_error_policy="log"
+    )
+    with _capture_warnings("langchain_runcycles.tool_gate") as logs:
+        result = gate.wrap_tool_call(tool_call_request, lambda r: "tool ran")
+    assert result == "tool ran"
+    assert any("commit failed" in r.getMessage() for r in logs)
+
+
+def test_invalid_settlement_policy_raises(sync_client: CyclesClient, subject: Any, action: Any) -> None:
+    with pytest.raises(ValueError, match="Invalid settlement_error_policy"):
+        CyclesToolGate(
+            sync_client, subject=subject, action=action, settlement_error_policy="bogus"  # type: ignore[arg-type]
+        )
 
 
 # --- helper: a tiny capturer scoped to a logger -----------------------------------

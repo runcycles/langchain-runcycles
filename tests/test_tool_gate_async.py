@@ -143,3 +143,39 @@ async def test_async_reserve_with_async_handler(
     gate = CyclesToolGate(async_client, subject=subject, action=action, mode="reserve")
     result = await gate.awrap_tool_call(tool_call_request, async_handler)
     assert result == "async tool result"
+
+
+@pytest.mark.asyncio
+async def test_async_settlement_raise_default_propagates_commit_failure(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Strict-governance default applies on the async path too."""
+
+    async def failing_commit(_rid: Any, _req: Any) -> CyclesResponse:
+        raise RuntimeError("cycles unavailable")
+
+    async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
+    gate = CyclesToolGate(async_client, subject=subject, action=action, mode="reserve")
+    with pytest.raises(RuntimeError, match="cycles unavailable"):
+        await gate.awrap_tool_call(tool_call_request, lambda r: "tool ran")
+
+
+@pytest.mark.asyncio
+async def test_async_settlement_log_swallows_commit_failure(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """Async opt-in `log` policy mirrors the sync one."""
+
+    async def failing_commit(_rid: Any, _req: Any) -> CyclesResponse:
+        raise RuntimeError("cycles unavailable")
+
+    async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        settlement_error_policy="log",
+    )
+    result = await gate.awrap_tool_call(tool_call_request, lambda r: "tool ran")
+    assert result == "tool ran"
