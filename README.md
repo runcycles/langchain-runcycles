@@ -177,6 +177,8 @@ gate = CyclesToolGate(
 )
 ```
 
+**Trade-off worth understanding:** `"raise"` surfaces the commit failure as a tool exception, so a LangChain agent may retry — at which point the tool's side effect (e.g. an email send, a payment, a CRM write) **repeats**. Choose `"log"` if your tool's side effects are not safely idempotent on retry.
+
 This only affects commit (success-path settlement); release on tool failure always logs and continues so the original tool exception wins.
 
 ## Async support
