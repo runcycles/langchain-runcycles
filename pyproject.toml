@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langchain-runcycles"
-version = "0.1.5"
-description = "LangChain agent middleware for Cycles — pre-tool-call authorization, fan-out caps, and per-tenant budget enforcement for Python agents using create_agent."
+version = "0.1.6"
+description = "LangChain agent middleware for Cycles — pre-execution budget authority for model calls, tool calls, and runaway agent loops in Python create_agent workflows."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
