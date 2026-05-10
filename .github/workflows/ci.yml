@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: runcycles/.github/.github/workflows/ci-python.yml@main
+    with:
+      mypy-target: langchain_runcycles
