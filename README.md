@@ -1,12 +1,16 @@
-# langchain-runcycles
+[![PyPI](https://img.shields.io/pypi/v/langchain-runcycles)](https://pypi.org/project/langchain-runcycles/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/langchain-runcycles)](https://pypi.org/project/langchain-runcycles/)
+[![CI](https://github.com/runcycles/langchain-runcycles/actions/workflows/ci.yml/badge.svg)](https://github.com/runcycles/langchain-runcycles/actions)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)](https://github.com/runcycles/langchain-runcycles/actions)
 
-[![PyPI](https://img.shields.io/pypi/v/langchain-runcycles.svg)](https://pypi.org/project/langchain-runcycles/)
-[![CI](https://github.com/runcycles/langchain-runcycles/actions/workflows/ci.yml/badge.svg)](https://github.com/runcycles/langchain-runcycles/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+# LangChain Runcycles — AI agent middleware for budget and action authority
 
-LangChain agent middleware for [Cycles](https://runcycles.io) — pre-tool-call authorization, fan-out caps, and per-tenant budget enforcement for Python agents.
+**LangChain agent middleware for AI agent governance — enforce cost limits, tool permissions, and multi-tenant policies in `create_agent` workflows before LLM calls or tool actions execute.** Works with LangGraph, LangSmith, OpenAI, Anthropic, MCP servers, and any LangChain 1.x agent runtime — built on the new [`AgentMiddleware`](https://docs.langchain.com/oss/python/langchain/middleware/) API (`wrap_tool_call`, `before_model`, `wrap_model_call`).
 
-This package exposes two `AgentMiddleware` subclasses that gate agent behavior at runtime against an external Cycles policy/budget service:
+`AgentMiddleware` subclasses for the [Cycles Protocol](https://github.com/runcycles/cycles-protocol): gate every tool call with `wrap_tool_call`, cap model fan-out with `before_model` + `jump_to: "end"`, reserve and commit budget per call — with sync and async support, typed configuration, and optional remote policy decisions. Install via `pip install langchain-runcycles`.
+
+## What's in the box
 
 - **`CyclesToolGate`** — runs before every tool call. Authorizes via `client.decide()` and/or reserves budget via `client.create_reservation()`. Returns a `ToolMessage` on denial so the model can recover gracefully.
 - **`CyclesFanOutGate`** — runs before every model turn. Halts the agent (with `jump_to: "end"`) when a turn cap is hit or when an external policy says to stop. Useful for runaway-loop protection and per-tenant burst caps.
