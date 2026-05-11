@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-05-11
+
+Correctness patch driven by external review. One real governance bug, two doc fixes, one minor lockdown. No public API change.
+
+### Fixed
+
+- **`commit_reservation` and `release_reservation` HTTP-failure responses are now honored** (both gates, sync + async). The runcycles SDK returns `CyclesResponse.http_error(...)` on HTTP failures *without raising*; v0.2.0–v0.2.2 only caught raised exceptions, so a failed commit silently looked like a successful commit and bypassed the documented `settlement_error_policy` contract. The release-path was similarly silent on HTTP-failure responses. Both paths now check `response.is_success` and apply the same policy as the exception path:
+  - Commit HTTP failure + `settlement_error_policy="raise"` (default) → `RuntimeError` carrying `denial_reason(response)`.
+  - Commit HTTP failure + `settlement_error_policy="log"` → warning logged, handler result preserved.
+  - Release HTTP failure (best-effort) → warning logged, never raised (regardless of policy).
+  
+  Log message wording changed from "commit failed" to "commit raised" / "commit returned HTTP failure" so operators can distinguish the two failure modes in audit logs. Locked down by `tests/test_tool_gate.py::test_commit_http_failure_raise_default_propagates`, `::test_commit_http_failure_log_swallows`, `::test_release_http_failure_logged`, sync/async equivalents in `test_model_gate.py` / `test_model_gate_async.py` / `test_tool_gate_async.py`. **This is the user-visible behavior change in this release** — code that relied on the silent-success path will now see governance-policy responses (which is what was always documented).
+
+- **`CyclesToolGate` with `tool_call={"id": None}`** now flows through `coerce_tool_call_id`'s synthesis path and produces `missing-<12-hex>`. Previously the `str(tool_call.get("id", "")) or None` pattern produced the literal string `"None"`, creating deterministic `decide-None` idempotency-key collisions across all malformed calls. Locked down by `tests/test_tool_gate.py::test_explicit_none_tool_call_id_uses_synthetic_path` and the async sibling.
+
+### Docs
+
+- **`docs/runcycles.mdx` `CyclesToolGate` section** — clarified that `action` is a single-argument callable `(request) -> Action` while `subject` is a two-argument callable `(request, state) -> Subject`. The prior wording said both "resolve from request and state," which would TypeError if users followed it literally for `action`.
+- **`examples/tenant_budget_agent.py` install instructions** — corrected `langchain-openai` / `OPENAI_API_KEY` to `langchain-anthropic` / `ANTHROPIC_API_KEY` to match the `claude-sonnet-4-6` model the example actually uses.
+
+### Coverage
+
+159 tests (was 145), 99.62% coverage (gate `fail_under = 95`); `model_gate.py` and `tool_gate.py` both at 100%. 14 new tests cover the four corrected paths (3 HTTP-failure scenarios × 4 gate variants + 2 None-id regression checks).
+
+### Behavior change
+
+Existing code that relied on silent-success commit on HTTP-failure responses will now invoke `settlement_error_policy`. The default policy is `"raise"`, so callers that never set the policy explicitly will start seeing `RuntimeError("Cycles commit_reservation returned HTTP failure...")` propagate when the Cycles server returns a non-2xx commit response. This is the documented contract; the prior silent behavior was a bug. Set `settlement_error_policy="log"` to opt into the swallow-and-preserve-result behavior if that matches your UX needs.
+
 ## [0.2.2] - 2026-05-11
 
 Final piece of [issue #13](https://github.com/runcycles/langchain-runcycles/issues/13): the multi-agent / HITL / multi-tenant demo that meets LangChain's co-marketing bar. No library code change; example + write-up only.

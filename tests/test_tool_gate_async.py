@@ -229,3 +229,104 @@ async def test_async_idempotency_namespace_callable(
     )
     await gate.awrap_tool_call(tool_call_request, lambda r: "ok")
     assert captured["decide"] == "decide-derived-send_email-tc_1"
+
+
+# --- v0.2.3 HTTP-failure handling on settlement paths ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_commit_http_failure_raise_default_propagates(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+) -> None:
+    """async parity: non-success commit response triggers settlement_error_policy."""
+    from tests.conftest import commit_failure
+
+    async def failing_commit(_rid: Any, _req: Any) -> CyclesResponse:
+        return commit_failure()
+
+    async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
+    gate = CyclesToolGate(async_client, subject=subject, action=action, mode="reserve")
+    with pytest.raises(RuntimeError, match="HTTP failure"):
+        await gate.awrap_tool_call(tool_call_request, lambda r: "tool ran")
+
+
+@pytest.mark.asyncio
+async def test_async_commit_http_failure_log_swallows(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """async parity: log policy swallows HTTP-failure commits."""
+    import logging
+
+    from tests.conftest import commit_failure
+
+    async def failing_commit(_rid: Any, _req: Any) -> CyclesResponse:
+        return commit_failure()
+
+    async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        settlement_error_policy="log",
+    )
+    with caplog.at_level(logging.WARNING, logger="langchain_runcycles.tool_gate"):
+        result = await gate.awrap_tool_call(tool_call_request, lambda r: "tool ran")
+    assert result == "tool ran"
+    assert "commit returned HTTP failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_async_release_http_failure_logged(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """async parity: non-success release is logged, never raised."""
+    import logging
+
+    from tests.conftest import release_failure
+
+    async def failing_release(_rid: Any, _req: Any) -> CyclesResponse:
+        return release_failure()
+
+    async_client.release_reservation = failing_release  # type: ignore[method-assign]
+    gate = CyclesToolGate(async_client, subject=subject, action=action, mode="reserve")
+
+    def boom(_r: Any) -> Any:
+        raise RuntimeError("tool failed")
+
+    with caplog.at_level(logging.WARNING, logger="langchain_runcycles.tool_gate"):
+        with pytest.raises(RuntimeError, match="tool failed"):
+            await gate.awrap_tool_call(tool_call_request, boom)
+    assert "release returned HTTP failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_async_explicit_none_tool_call_id_uses_synthetic_path(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+) -> None:
+    """async parity for the sync LOW#1 fix: id=None goes through synthetic path."""
+    import re
+
+    async def deny_decide(_req: Any) -> CyclesResponse:
+        return deny_response("X")
+
+    async_client.decide = deny_decide  # type: ignore[method-assign]
+    request = FakeToolCallRequest(call_id=None)  # type: ignore[arg-type]
+    gate = CyclesToolGate(async_client, subject=subject, action=action, mode="decide")
+    result = await gate.awrap_tool_call(request, lambda r: "never")
+    assert isinstance(result, ToolMessage)
+    assert re.match(r"^missing-[0-9a-f]{12}$", result.tool_call_id)
+    assert result.tool_call_id != "None"

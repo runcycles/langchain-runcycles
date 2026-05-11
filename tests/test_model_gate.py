@@ -450,3 +450,77 @@ def test_cost_fn_used_in_decide_reserve_mode(
     commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
     commit_request = commit_args[1]
     assert commit_request.actual.amount == 7_777
+
+
+# --- v0.2.3 HTTP-failure handling on settlement paths ----------------------------------
+
+
+def test_commit_http_failure_raise_default_propagates(
+    sync_client: CyclesClient,
+    subject: Any,
+    action: Any,
+    model_request: FakeModelRequest,
+) -> None:
+    """A non-success commit response (HTTP error) must trigger the same
+    settlement_error_policy as a raised exception. Locks down the v0.2.3 fix."""
+    from tests.conftest import commit_failure
+
+    sync_client.commit_reservation.return_value = commit_failure()  # type: ignore[attr-defined]
+    gate = CyclesModelGate(sync_client, subject=subject, action=action, mode="reserve")
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    with pytest.raises(RuntimeError, match="HTTP failure"):
+        gate.wrap_model_call(model_request, handler)
+
+
+def test_commit_http_failure_log_swallows(
+    sync_client: CyclesClient,
+    subject: Any,
+    action: Any,
+    model_request: FakeModelRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """settlement_error_policy='log' applies to HTTP-failure responses too."""
+    import logging
+
+    from tests.conftest import commit_failure
+
+    sync_client.commit_reservation.return_value = commit_failure()  # type: ignore[attr-defined]
+    gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        settlement_error_policy="log",
+    )
+    handler_result = ModelResponse(result=[AIMessage(content="model output")])
+    handler = MagicMock(return_value=handler_result)
+    with caplog.at_level(logging.WARNING, logger="langchain_runcycles.model_gate"):
+        result = gate.wrap_model_call(model_request, handler)
+    assert result is handler_result
+    assert "commit returned HTTP failure" in caplog.text
+
+
+def test_release_http_failure_logged(
+    sync_client: CyclesClient,
+    subject: Any,
+    action: Any,
+    model_request: FakeModelRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-success release response is best-effort logged; never raised regardless
+    of settlement_error_policy."""
+    import logging
+
+    from tests.conftest import release_failure
+
+    sync_client.release_reservation.return_value = release_failure()  # type: ignore[attr-defined]
+    gate = CyclesModelGate(sync_client, subject=subject, action=action, mode="reserve")
+
+    def boom(_r: Any) -> Any:
+        raise RuntimeError("model failed")
+
+    with caplog.at_level(logging.WARNING, logger="langchain_runcycles.model_gate"):
+        with pytest.raises(RuntimeError, match="model failed"):
+            gate.wrap_model_call(model_request, boom)
+    # Original RuntimeError wins; release HTTP failure is logged for operator audit.
+    assert "release returned HTTP failure" in caplog.text

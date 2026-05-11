@@ -55,6 +55,7 @@ from langchain_runcycles._config import (
 )
 from langchain_runcycles._internal import (
     _DEFAULT_ESTIMATE,
+    denial_reason,
     format_denial,
     get_state,
     is_allowed,
@@ -224,7 +225,7 @@ class CyclesModelGate(AgentMiddleware):
 
         actual = self._resolve_actual(result)
         try:
-            self._client.commit_reservation(
+            commit_resp = self._client.commit_reservation(
                 reservation_id,
                 CommitRequest(
                     idempotency_key=f"commit-{idem}",
@@ -235,22 +236,42 @@ class CyclesModelGate(AgentMiddleware):
             if self._settlement_error_policy == "raise":
                 raise
             logger.warning(
-                "Cycles commit failed for model reservation %s; settlement_error_policy='log' "
+                "Cycles commit raised for model reservation %s; settlement_error_policy='log' "
                 "so the model result is preserved (reservation will expire via TTL)",
                 reservation_id,
                 exc_info=True,
+            )
+            return result
+        if not commit_resp.is_success:
+            if self._settlement_error_policy == "raise":
+                raise RuntimeError(
+                    f"Cycles commit_reservation returned HTTP failure for model reservation "
+                    f"{reservation_id}: {denial_reason(commit_resp)}"
+                )
+            logger.warning(
+                "Cycles commit returned HTTP failure for model reservation %s: %s; "
+                "settlement_error_policy='log' so the model result is preserved",
+                reservation_id,
+                denial_reason(commit_resp),
             )
         return result
 
     def _safe_release_sync(self, reservation_id: str, idem: str) -> None:
         assert isinstance(self._client, CyclesClient)
         try:
-            self._client.release_reservation(
+            release_resp = self._client.release_reservation(
                 reservation_id,
                 ReleaseRequest(idempotency_key=f"release-{idem}"),
             )
         except Exception:  # pragma: no cover - defensive
-            logger.warning("Cycles release failed for reservation %s", reservation_id, exc_info=True)
+            logger.warning("Cycles release raised for reservation %s", reservation_id, exc_info=True)
+            return
+        if not release_resp.is_success:
+            logger.warning(
+                "Cycles release returned HTTP failure for reservation %s: %s",
+                reservation_id,
+                denial_reason(release_resp),
+            )
 
     # ----------------------------------------------------------------- async
 
@@ -319,7 +340,7 @@ class CyclesModelGate(AgentMiddleware):
 
         actual = self._resolve_actual(result)
         try:
-            await self._client.commit_reservation(
+            commit_resp = await self._client.commit_reservation(
                 reservation_id,
                 CommitRequest(
                     idempotency_key=f"commit-{idem}",
@@ -330,19 +351,39 @@ class CyclesModelGate(AgentMiddleware):
             if self._settlement_error_policy == "raise":
                 raise
             logger.warning(
-                "Cycles commit failed for model reservation %s; settlement_error_policy='log' "
+                "Cycles commit raised for model reservation %s; settlement_error_policy='log' "
                 "so the model result is preserved (reservation will expire via TTL)",
                 reservation_id,
                 exc_info=True,
+            )
+            return result
+        if not commit_resp.is_success:
+            if self._settlement_error_policy == "raise":
+                raise RuntimeError(
+                    f"Cycles commit_reservation returned HTTP failure for model reservation "
+                    f"{reservation_id}: {denial_reason(commit_resp)}"
+                )
+            logger.warning(
+                "Cycles commit returned HTTP failure for model reservation %s: %s; "
+                "settlement_error_policy='log' so the model result is preserved",
+                reservation_id,
+                denial_reason(commit_resp),
             )
         return result
 
     async def _safe_release_async(self, reservation_id: str, idem: str) -> None:
         assert isinstance(self._client, AsyncCyclesClient)
         try:
-            await self._client.release_reservation(
+            release_resp = await self._client.release_reservation(
                 reservation_id,
                 ReleaseRequest(idempotency_key=f"release-{idem}"),
             )
         except Exception:  # pragma: no cover - defensive
-            logger.warning("Cycles release failed for reservation %s", reservation_id, exc_info=True)
+            logger.warning("Cycles release raised for reservation %s", reservation_id, exc_info=True)
+            return
+        if not release_resp.is_success:
+            logger.warning(
+                "Cycles release returned HTTP failure for reservation %s: %s",
+                reservation_id,
+                denial_reason(release_resp),
+            )

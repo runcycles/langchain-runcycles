@@ -36,6 +36,7 @@ from langchain_runcycles._config import ActionConfig, DenialFormatter, Idempoten
 from langchain_runcycles._internal import (
     _DEFAULT_ESTIMATE,
     coerce_tool_call_id,
+    denial_reason,
     format_denial,
     get_state,
     get_tool_call,
@@ -44,6 +45,17 @@ from langchain_runcycles._internal import (
     resolve_action,
     resolve_subject,
 )
+
+
+def _coerce_id(value: Any) -> str:
+    """Treat None, empty, or non-string ids the same as missing — fall through to coerce_tool_call_id's synthesis path.
+
+    Without this, an upstream `tool_call={"id": None}` would `str(None)` to the literal
+    string "None" (truthy non-empty), bypassing synthesis and producing deterministic
+    `decide-None` collisions across malformed calls."""
+    if isinstance(value, str) and value:
+        return coerce_tool_call_id(value)
+    return coerce_tool_call_id(None)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable
@@ -107,7 +119,7 @@ class CyclesToolGate(AgentMiddleware):
             )
         tool_call = get_tool_call(request)
         tool_name = str(tool_call.get("name", "")) or None
-        tool_call_id = coerce_tool_call_id(str(tool_call.get("id", "")) or None)
+        tool_call_id = _coerce_id(tool_call.get("id"))
         subject = resolve_subject(self._subject, request, get_state(request))
         action = resolve_action(self._action, request, tool_name)
         namespace = self._resolve_namespace(request)
@@ -175,7 +187,7 @@ class CyclesToolGate(AgentMiddleware):
             raise
 
         try:
-            self._client.commit_reservation(
+            commit_resp = self._client.commit_reservation(
                 reservation_id,
                 CommitRequest(
                     idempotency_key=f"commit-{idem}",
@@ -184,27 +196,47 @@ class CyclesToolGate(AgentMiddleware):
             )
         except Exception:
             if self._settlement_error_policy == "raise":
-                # Strict governance default: tool ran but commit failed; surface the
+                # Strict governance default: tool ran but commit raised; surface the
                 # exception so the caller can reconcile rather than silently dropping
                 # accounting. Use settlement_error_policy="log" for best-effort UX.
                 raise
             logger.warning(
-                "Cycles commit failed for reservation %s; settlement_error_policy='log' "
+                "Cycles commit raised for reservation %s; settlement_error_policy='log' "
                 "so the tool result is preserved (reservation will expire via TTL)",
                 reservation_id,
                 exc_info=True,
+            )
+            return result
+        if not commit_resp.is_success:
+            if self._settlement_error_policy == "raise":
+                raise RuntimeError(
+                    f"Cycles commit_reservation returned HTTP failure for reservation "
+                    f"{reservation_id}: {denial_reason(commit_resp)}"
+                )
+            logger.warning(
+                "Cycles commit returned HTTP failure for reservation %s: %s; "
+                "settlement_error_policy='log' so the tool result is preserved",
+                reservation_id,
+                denial_reason(commit_resp),
             )
         return result
 
     def _safe_release_sync(self, reservation_id: str, idem: str) -> None:
         assert isinstance(self._client, CyclesClient)
         try:
-            self._client.release_reservation(
+            release_resp = self._client.release_reservation(
                 reservation_id,
                 ReleaseRequest(idempotency_key=f"release-{idem}"),
             )
         except Exception:  # pragma: no cover - defensive
-            logger.warning("Cycles release failed for reservation %s", reservation_id, exc_info=True)
+            logger.warning("Cycles release raised for reservation %s", reservation_id, exc_info=True)
+            return
+        if not release_resp.is_success:
+            logger.warning(
+                "Cycles release returned HTTP failure for reservation %s: %s",
+                reservation_id,
+                denial_reason(release_resp),
+            )
 
     # ----------------------------------------------------------------- async
 
@@ -216,7 +248,7 @@ class CyclesToolGate(AgentMiddleware):
             )
         tool_call = get_tool_call(request)
         tool_name = str(tool_call.get("name", "")) or None
-        tool_call_id = coerce_tool_call_id(str(tool_call.get("id", "")) or None)
+        tool_call_id = _coerce_id(tool_call.get("id"))
         subject = resolve_subject(self._subject, request, get_state(request))
         action = resolve_action(self._action, request, tool_name)
         namespace = self._resolve_namespace(request)
@@ -289,7 +321,7 @@ class CyclesToolGate(AgentMiddleware):
             raise
 
         try:
-            await self._client.commit_reservation(
+            commit_resp = await self._client.commit_reservation(
                 reservation_id,
                 CommitRequest(
                     idempotency_key=f"commit-{idem}",
@@ -301,19 +333,39 @@ class CyclesToolGate(AgentMiddleware):
                 # See sync sibling: governance-first default surfaces commit failure.
                 raise
             logger.warning(
-                "Cycles commit failed for reservation %s; settlement_error_policy='log' "
+                "Cycles commit raised for reservation %s; settlement_error_policy='log' "
                 "so the tool result is preserved (reservation will expire via TTL)",
                 reservation_id,
                 exc_info=True,
+            )
+            return result
+        if not commit_resp.is_success:
+            if self._settlement_error_policy == "raise":
+                raise RuntimeError(
+                    f"Cycles commit_reservation returned HTTP failure for reservation "
+                    f"{reservation_id}: {denial_reason(commit_resp)}"
+                )
+            logger.warning(
+                "Cycles commit returned HTTP failure for reservation %s: %s; "
+                "settlement_error_policy='log' so the tool result is preserved",
+                reservation_id,
+                denial_reason(commit_resp),
             )
         return result
 
     async def _safe_release_async(self, reservation_id: str, idem: str) -> None:
         assert isinstance(self._client, AsyncCyclesClient)
         try:
-            await self._client.release_reservation(
+            release_resp = await self._client.release_reservation(
                 reservation_id,
                 ReleaseRequest(idempotency_key=f"release-{idem}"),
             )
         except Exception:  # pragma: no cover - defensive
-            logger.warning("Cycles release failed for reservation %s", reservation_id, exc_info=True)
+            logger.warning("Cycles release raised for reservation %s", reservation_id, exc_info=True)
+            return
+        if not release_resp.is_success:
+            logger.warning(
+                "Cycles release returned HTTP failure for reservation %s: %s",
+                reservation_id,
+                denial_reason(release_resp),
+            )
