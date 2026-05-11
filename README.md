@@ -14,7 +14,7 @@ Built on LangChain's [`AgentMiddleware`](https://docs.langchain.com/oss/python/l
 - **`wrap_tool_call`** — tool-call authorization plus optional reserve/commit/release lifecycle around each tool execution
 - **`before_model`** (with `@hook_config(can_jump_to=["end"])`) — fan-out caps and external policy halts before another model turn
 
-Per-call actual-cost extraction (provider-specific token-usage parsing) and streaming integration are v0.2.0 scope. Until then, `CyclesModelGate` commits at the configured `estimate`; for precise per-call token capture today, use the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py).
+Per-call actual-cost extraction is available on `CyclesModelGate` via the `cost_fn` parameter (v0.2.0+): supply a `Callable[[ModelResponse], Amount]` and commits debit at actual provider-reported token usage instead of the configured `estimate`. `langchain_runcycles.extractors` ships `openai_cost` and `anthropic_cost` factories parameterized by per-million-token pricing. For non-agent LangChain code (bare chains, RAG runnables), the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py) remains the right tool.
 
 Install via `pip install langchain-runcycles`.
 
@@ -79,7 +79,7 @@ model_gate = CyclesModelGate(
 )
 ```
 
-> v0.1.5 commits at the configured `estimate`. Per-call actual-cost extraction (token usage from provider response metadata) and streaming integration land in v0.2.0. For precise per-call token cost capture today, use the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py).
+> Add `cost_fn=openai_cost(prompt_per_million_usd=2.50, completion_per_million_usd=10.00)` (or `anthropic_cost(...)`, or a custom `Callable[[ModelResponse], Amount]`) to commit at actual reported token usage instead of `estimate` (v0.2.0+). See the "Actual-cost extraction on `CyclesModelGate`" section below for the full pattern.
 
 ### `CyclesToolGate`
 
@@ -191,6 +191,40 @@ gate = CyclesToolGate(
 
 **Errors in the callable propagate**: if your callable raises, the exception surfaces from `wrap_tool_call` / `before_model` to the agent. This is intentional — fail-fast on a misconfigured callable rather than silently producing keys with no namespace. Wrap in try/except inside the callable if you want a fallback.
 
+### Actual-cost extraction on `CyclesModelGate` (v0.2.0+)
+
+Reserve-mode model calls commit at the configured `estimate` by default. Pass a `cost_fn` to commit at actual provider-reported token usage instead:
+
+```python
+from langchain_runcycles import CyclesModelGate
+from langchain_runcycles.extractors import anthropic_cost, openai_cost
+from runcycles import Action, Amount, Subject, Unit
+
+# OpenAI gpt-4o pricing (2026-05): $2.50/M input, $10.00/M output
+gate = CyclesModelGate(
+    client,
+    subject=Subject(tenant="acme"),
+    action=Action(kind="llm.completion", name="gpt-4o"),
+    mode="reserve",
+    estimate=Amount(unit=Unit.USD_MICROCENTS, amount=2_000_000),  # worst-case headroom
+    cost_fn=openai_cost(prompt_per_million_usd=2.50, completion_per_million_usd=10.00),
+)
+
+# Anthropic claude-sonnet-4-6 pricing (2026-05): $3.00/M input, $15.00/M output
+gate = CyclesModelGate(
+    client,
+    subject=Subject(tenant="acme"),
+    action=Action(kind="llm.completion", name="claude-sonnet-4-6"),
+    mode="reserve",
+    estimate=Amount(unit=Unit.USD_MICROCENTS, amount=2_500_000),
+    cost_fn=anthropic_cost(input_per_million_usd=3.00, output_per_million_usd=15.00),
+)
+```
+
+Both factories read `AIMessage.usage_metadata` (LangChain's normalized usage shape, populated by `langchain-openai` and `langchain-anthropic`) and return an `Amount` in `USD_MICROCENTS`. Pricing arguments are keyword-only so they can't be swapped accidentally.
+
+You can also pass a custom `cost_fn: Callable[[ModelResponse], Amount]` — the middleware calls it after the wrapped handler returns and uses the returned `Amount` for the commit. **If your callable raises or returns a non-`Amount`, the gate logs a warning and falls back to `estimate`** — a costing bug never erases the model result.
+
 ### Denial messages
 
 `denial_message` accepts a format string (placeholders: `{reason}`, `{tool}`, `{decision}`) or a callable receiving the `CyclesResponse`:
@@ -253,10 +287,10 @@ await agent.ainvoke({"messages": [...]})
 - [`examples/tenant_budget_agent.py`](examples/tenant_budget_agent.py) — single-tenant budget gate with risky-tool denial recovery.
 - [`examples/multi_agent_fanout.py`](examples/multi_agent_fanout.py) — multi-agent / HITL flow with `CyclesToolGate` + `CyclesFanOutGate` + `HumanInTheLoopMiddleware`.
 
-## Known limitations (v0.1)
+## Known limitations (v0.2)
 
-- **Reserve mode commits at the configured `estimate`, not actual usage.** `mode="reserve"` and `mode="decide+reserve"` reserve the estimate, run the tool, then commit *the same amount* on success. Per-tool actual-cost instrumentation (analogous to `runcycles.stream_reservation`'s `cost_fn`) is on the roadmap. Until then, set `estimate` to the worst-case spend per call you're willing to debit, or use `mode="decide"` if you only want policy gating without budget movement.
-- **Model-call middleware is architecture-complete but commits at the configured `estimate`.** `CyclesModelGate` (v0.1.5+) implements `wrap_model_call` with all three modes (`decide` / `reserve` / `decide+reserve`), but does not yet extract actual provider token usage from response metadata or support streaming settlement. Provider-specific usage extractors (OpenAI, Anthropic) and streaming integration are v0.2.0 scope. For precise per-call token cost capture today, use the `BaseCallbackHandler` recipe in `cycles-client-python` alongside `CyclesModelGate` (the two compose: middleware reserves, callback commits actuals).
+- **`CyclesToolGate` reserve mode commits at the configured `estimate`, not actual usage.** Per-tool actual-cost instrumentation (analogous to `CyclesModelGate.cost_fn`) is still on the roadmap; set `estimate` to the worst-case spend per call you're willing to debit, or use `mode="decide"` for policy gating without budget movement.
+- **Streaming verification deferred.** `CyclesModelGate.wrap_model_call` runs once per model turn and the commit fires after the handler returns; we haven't yet shipped explicit tests against `astream`/`astream_events` to confirm the commit waits for stream completion. Tracked on the v0.2.x roadmap (issue #13).
 - **Per-call subject only via the extractor form.** Static `Subject` pins one tenant per middleware instance. For per-tenant/per-agent routing in a multi-tenant deployment, supply a `SubjectExtractor` callable.
 - **Idempotency keys are deterministic only when `tool_call_id` is present.** Keys take the shape `{prefix}-{tool_call_id}` so retries land on the same Cycles reservation. If the upstream omits `tool_call_id`, the middleware synthesizes a fresh `missing-<hex>` id (and logs a warning) — that path is non-deterministic across retries because the synthesis itself is random. Conformant LangChain runtimes always supply `id`.
 
