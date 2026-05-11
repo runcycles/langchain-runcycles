@@ -62,7 +62,7 @@ Compared the following across LangChain documentation and this package's source:
 ToolMessage(content=<denial-string>, tool_call_id=<request.tool_call['id']>)
 ```
 
-`tool_call_id` is required by LangChain; we pass through the original id from `request.tool_call`. If the upstream omits `id`, `coerce_tool_call_id` synthesizes `missing-<12-hex>` and logs a warning (see `_internal.py`); the synthesized id is fresh per call, so the resulting idempotency-key path is *not* retry-stable on this fallback.
+`tool_call_id` is required by LangChain; we pass through the original id from `request.tool_call` when it's a non-empty string. The synthesis path in `coerce_tool_call_id` (via the `_coerce_id` helper in `tool_gate.py`, v0.2.3+) fires when the id is absent, explicitly `None`, the empty string, or any non-string value — all four cases produce `missing-<12-hex>` and a warning at `_internal.py`. The synthesized id is fresh per call, so the resulting idempotency-key path is *not* retry-stable on this fallback. Conformant LangChain runtimes always supply a non-empty string `id`.
 
 ## SDK methods consumed
 
@@ -115,7 +115,17 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 3. Success: `commit_reservation`. For `CyclesModelGate` (v0.2.0+), commits at `cost_fn(result)` if `cost_fn` is supplied (with fallback to `estimate` on extractor error); otherwise commits at `estimate`. For `CyclesToolGate`, always commits at `estimate` (a tool-side `cost_fn` analog is roadmap, not yet shipped).
 4. Exception: `release_reservation`, then re-raise.
 
-**Settlement-failure handling** (v0.1.2+ for tool gate, v0.1.5+ for model gate): if the success-path `commit_reservation` itself raises, behavior is governed by `settlement_error_policy` on `CyclesToolGate` and `CyclesModelGate` — default `"raise"` propagates the commit exception so the caller can reconcile (strict governance); opt-in `"log"` swallows the failure and returns the result (best-effort accounting; reservation expires via TTL). The release path on handler-side exception always logs and continues so the original handler exception wins.
+**Settlement-failure handling** (v0.1.2+ for tool gate, v0.1.5+ for model gate; broadened in v0.2.3+): commit failures fall into two cases:
+
+- **Commit raises**: the SDK call itself throws (network error, client misconfiguration, etc.).
+- **Commit returns non-success**: the SDK returns `CyclesResponse.http_error(...)` carrying a 4xx/5xx from the Cycles server. *Pre-v0.2.3 this case was silently treated as success, bypassing the policy contract; v0.2.3 fixed this.*
+
+Both cases now honor `settlement_error_policy` on `CyclesToolGate` and `CyclesModelGate` identically:
+
+- Default `"raise"` — for "commit raised" the original exception propagates; for "commit returned HTTP failure" a `RuntimeError("Cycles commit_reservation returned HTTP failure...: <denial_reason>")` is raised. Either way the caller can reconcile (strict governance).
+- Opt-in `"log"` — logs at WARNING ("commit raised" or "commit returned HTTP failure" — wording disambiguates the two failure modes for operator audit) and returns the handler result (best-effort accounting; the reservation expires via TTL).
+
+**Release-path handling** (v0.2.3+ broadened): the release path is always best-effort (cleanup after handler exception), so it logs and continues regardless of policy. Both an exception raised by `release_reservation` and a non-success `CyclesResponse` are logged at WARNING ("release raised" vs "release returned HTTP failure"). The original handler exception always wins — release-path failures never mask it.
 
 ## Test coverage
 
