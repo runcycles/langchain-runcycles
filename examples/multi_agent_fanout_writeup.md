@@ -24,10 +24,10 @@ The pattern: every *spend-creating* or *side-effecting* operation gets a synchro
 These three gates compose. Run them in cheapest-to-most-expensive order so the most expensive checks happen only when the cheaper ones pass:
 
 ```
-fan-out cap  →  model authorization  →  tool authorization  →  (optionally) human-in-the-loop
+fan-out cap  →  model authorization  →  human-in-the-loop  →  tool authorization
 ```
 
-When the fan-out gate halts at turn 20, no model call happens, so no tool call happens, so no human is asked. When the tenant's budget is exhausted at the model gate, the agent never reaches the tool. When the tool gate denies, the human is never prompted. **Each gate's denial saves the cost of everything downstream.**
+When the fan-out gate halts at turn 20, no model call happens, so no tool call happens, so no human is asked. When the tenant's budget is exhausted at the model gate, the agent never reaches HITL or the tool. When the tool gate denies, it happens after any required human approval but still before the side effect. **The early gates save the cost of everything downstream; the tool gate is the final machine authorization before action.**
 
 ## Why this matters more in multi-tenant deployments
 
@@ -42,9 +42,9 @@ That means per-tenant accounting has to be **per-call**, not per-batch. Aggregat
 ```python
 middleware = [
     CyclesFanOutGate(max_turns=20, client=client, ...),
-    CyclesModelGate(client, mode="reserve", cost_fn=anthropic_cost(...), ...),
-    CyclesToolGate(client, mode="decide+reserve", ...),
+    CyclesModelGate(client, mode="decide+reserve", cost_fn=anthropic_cost(...), ...),
     HumanInTheLoopMiddleware(interrupt_on={"send_email": True}),
+    CyclesToolGate(client, mode="decide+reserve", ...),
 ]
 ```
 
@@ -52,11 +52,11 @@ The subject — *who* is acting — is resolved per-call from agent state, so th
 
 ### What you can watch happen
 
-Run two tenants through the same agent:
+Run three tenants through the same agent:
 
-- **Tenant A** (`acme`) has full budget. The research agent fans out, summarizes, drafts an email, and pauses for human approval. Human approves. `CyclesToolGate` commits the `send_email` reservation. Done.
+- **Tenant A** (`acme`) has full budget. The research agent fans out, summarizes, drafts an email, and pauses for human approval. Human approves. `CyclesToolGate` authorizes and commits the `send_email` reservation. Done.
 - **Tenant B** (`globex`) has exhausted their per-day research budget. `CyclesModelGate.decide()` denies the first LLM call. The agent never reaches the research tools. Total spend on Cycles' side: one `decide()` API call. Total spend on Anthropic's side: zero.
-- **Tenant C** (`hooli`) has budget but no allowance for `send_email` specifically. Research runs normally. When the writer agent tries to call `send_email`, `CyclesToolGate.decide()` denies; the agent's reasoning loop sees the denial as a tool result and chooses an alternative path (printing the draft instead of sending). HITL is never prompted.
+- **Tenant C** (`hooli`) has budget but no allowance for `send_email` specifically. Research runs normally. The human can approve the proposed email, but `CyclesToolGate.decide()` still denies before the tool executes; the agent's reasoning loop sees the denial as a tool result and chooses an alternative path (printing the draft instead of sending). No email is sent.
 
 The same `create_agent(...)` call serves all three. The runtime authority is in the middleware list, not branched into your application code.
 
@@ -73,7 +73,7 @@ cost_fn=anthropic_cost(
 )
 ```
 
-Effect: your per-tenant budget ledger matches the Anthropic invoice line-by-line. A 50-token completion debits a 50-token cost, not a 2,000,000-microcent worst-case bucket.
+Effect: your per-tenant budget ledger matches the Anthropic invoice line-by-line. A 50-token completion debits a 50-token cost, not a 2,500,000-microcent worst-case bucket.
 
 If the extractor itself fails (provider response shape changes, missing `usage_metadata`, pricing miscalculation), the gate logs and falls back to `estimate`. A costing bug downgrades accuracy; it never erases a successful model result.
 

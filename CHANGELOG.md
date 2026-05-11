@@ -11,7 +11,7 @@ Final piece of [issue #13](https://github.com/runcycles/langchain-runcycles/issu
 
 ### Added
 
-- **`examples/multi_agent_fanout.py`** rewritten to compose the **full v0.2.x governance triad**: `CyclesFanOutGate` + `CyclesModelGate` (with `anthropic_cost` extractor for actual-cost commits) + `CyclesToolGate` (in `decide+reserve` mode) + LangChain's `HumanInTheLoopMiddleware` on `send_email`. Composition order is documented inline (fan-out → model → tool → HITL, cheapest gate first). Per-tenant subject resolution via callable so the same agent process serves many tenants with independent budgets.
+- **`examples/multi_agent_fanout.py`** rewritten to compose the **full v0.2.x governance triad**: `CyclesFanOutGate` + `CyclesModelGate` (with `anthropic_cost` extractor for actual-cost commits) + LangChain's `HumanInTheLoopMiddleware` on `send_email` + `CyclesToolGate` (in `decide+reserve` mode). Composition order is documented inline to match LangChain's hook timing (fan-out → model → HITL review → final tool authorization). A custom state schema preserves per-tenant config so the same agent process serves many tenants with independent budgets.
 - **`examples/multi_agent_fanout_writeup.md`** — a problem-framed pattern walkthrough leading with "pre-execution budget authority for multi-tenant agents," with the demo as a concrete proof point. Three failure-mode scenarios (full-budget tenant, fully-denied tenant, partially-allowed tenant) demonstrate how each gate independently saves the cost of everything downstream. Companion artifact for LangChain co-marketing per their stated "educational, problem-framed, multi-agent / HITL" preference.
 
 ### Changed
@@ -20,7 +20,7 @@ Final piece of [issue #13](https://github.com/runcycles/langchain-runcycles/issu
 
 ### Coverage
 
-144 tests, 99.59% coverage (gate `fail_under = 95`). `tests/test_examples.py` import-smoke continues to gate both bundled examples on every CI run.
+145 tests, 99.59% coverage (gate `fail_under = 95`). `tests/test_examples.py` import-smoke continues to gate both bundled examples on every CI run and now verifies the demo's tenant state schema, middleware order, and `decide+reserve` model gate mode.
 
 ### Closes
 

@@ -16,10 +16,10 @@ all three Cycles middleware classes plus LangChain's built-in
     call, reserving budget per call and committing on success — so a
     half-finished run leaves no orphan reservations.
   * :class:`HumanInTheLoopMiddleware` inserts a confirmation step before
-    ``send_email``. Cycles authorizes the policy and budget; HITL is the
-    human approval layer. The two compose cleanly: a denial from Cycles
-    short-circuits before HITL is even asked; an HITL rejection releases
-    the Cycles reservation cleanly.
+    ``send_email``. Cycles authorizes the policy and budget at tool execution
+    time; HITL is the human approval layer. The two compose cleanly: a human
+    rejection prevents the tool from running, and Cycles can still deny the
+    approved tool call before the side effect happens.
 
 This example deliberately matches LangChain's stated co-marketing bar —
 multi-agent, HITL, multi-tenant, non-trivial failure modes (per-tenant
@@ -42,7 +42,7 @@ import os
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain.agents.middleware import AgentState, HumanInTheLoopMiddleware
 from langchain_core.tools import tool
 from runcycles import Action, Amount, CyclesClient, CyclesConfig, Subject, Unit
 
@@ -79,6 +79,13 @@ def spawn_subagent(query: str) -> str:
 
 # --- subject + action mapping ---
 
+
+class ResearchAgentState(AgentState, total=False):
+    """Agent state with per-run tenant config preserved for middleware."""
+
+    config: dict[str, Any]
+
+
 TOOL_ACTION_MAP = {
     "search": Action(kind="tool.call", name="search"),
     "summarize": Action(kind="tool.call", name="summarize"),
@@ -101,7 +108,7 @@ def per_tenant_subject(_request: Any, state: Any) -> Subject:
     return Subject(tenant=tenant, agent="researcher", toolset="research-tools")
 
 
-def build_agent() -> object:
+def build_agent(model: Any | None = None) -> Any:
     """Build the multi-tenant research agent with the full governance triad."""
     client = CyclesClient(
         CyclesConfig(
@@ -132,7 +139,7 @@ def build_agent() -> object:
         client,
         subject=per_tenant_subject,
         action=Action(kind="llm.completion", name="claude-sonnet-4-6"),
-        mode="reserve",
+        mode="decide+reserve",
         estimate=Amount(unit=Unit.USD_MICROCENTS, amount=2_500_000),  # $0.025 headroom
         cost_fn=anthropic_cost(
             # claude-sonnet-4-6 pricing (2026-05): $3.00/M input, $15.00/M output.
@@ -150,20 +157,22 @@ def build_agent() -> object:
         mode="decide+reserve",
     )
 
-    # HITL gate: human approval on the side-effecting tool. Cycles' authorization
-    # short-circuits BEFORE HITL is asked, so the human is never prompted for a
-    # tool the budget can't afford anyway.
+    # HITL gate: human approval on the side-effecting tool. LangChain asks for
+    # human review after the model proposes a tool call and before tool execution.
+    # If the human approves, CyclesToolGate still authorizes/reserves the tool
+    # immediately before the side effect can happen.
     hitl = HumanInTheLoopMiddleware(
         interrupt_on={"send_email": True},
     )
 
-    # Composition order: fan-out (cheapest) → model (next-cheapest, before LLM
-    # spend) → tool (before tool side effects) → HITL (last, before the action
-    # actually happens).
+    # Composition order: fan-out (cheapest) → model (before LLM spend) →
+    # HITL (human approval after the model proposes a tool) → tool gate
+    # (final machine authorization before side effects).
     return create_agent(
-        model=os.environ.get("MODEL", "claude-sonnet-4-6"),
+        model=model or os.environ.get("MODEL", "claude-sonnet-4-6"),
         tools=[search, summarize, send_email, spawn_subagent],
-        middleware=[fanout_gate, model_gate, tool_gate, hitl],
+        state_schema=ResearchAgentState,
+        middleware=[fanout_gate, model_gate, hitl, tool_gate],
     )
 
 

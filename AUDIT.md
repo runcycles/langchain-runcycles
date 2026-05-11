@@ -18,7 +18,7 @@
 | SDK methods consumed | 5/5 | 0 |
 | Idempotency-key generation | — | 0 |
 | Reservation lifecycle (reserve → commit/release) | — | 0 |
-| Test coverage gate | ≥95% | 0 (144 tests, 99.59%) |
+| Test coverage gate | ≥95% | 0 (145 tests, 99.59%) |
 
 **Overall: middleware contract is in conformance with the LangChain 1.x API as documented at <https://docs.langchain.com/oss/python/langchain/middleware/custom>.**
 
@@ -119,7 +119,7 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 
 ## Test coverage
 
-- 144 tests across:
+- 145 tests across:
   - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log, idempotency-key determinism, and v0.1.3 namespace static/callable/no-namespace/cross-run-collision)
   - `tests/test_model_gate.py`, `tests/test_model_gate_async.py` — sync + async model-gate paths (v0.1.5+); decide allow/deny, reserve lifecycle, settlement raise/log, namespace, **plus v0.2.0+ `cost_fn` (applied / None-fallback / exception-fallback / decide-mode-skip)**
   - `tests/test_extractors.py` — `openai_cost` / `anthropic_cost` factories (v0.2.0+); computation, zero-token edge, missing-`usage_metadata` raise, missing token fields raise, negative tokens raise, non-coercible token values raise, empty-`result` raise, fractional-cent rounding, keyword-only-pricing guard
