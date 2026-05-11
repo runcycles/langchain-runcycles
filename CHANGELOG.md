@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Python 3.13 and 3.14 are now declared supported** via PyPI classifiers. The reusable CI matrix was broadened from `["3.10", "3.12"]` to `["3.10", "3.11", "3.12", "3.13", "3.14"]` so lint + mypy + the full test suite run against every declared version on every PR. `AUDIT.md`'s "tested against" line was updated to match.
+
 ### Fixed
 
-- **Source distributions now exclude local virtualenv/cache/build artifacts.** `python -m build` from a developer checkout previously allowed local `.venv-*` directories into the sdist when present, producing oversized manual artifacts. Hatch now uses an explicit sdist include/exclude policy, and `.gitignore` ignores `.venv*/`.
+- **Source distributions now exclude local virtualenv/cache/build artifacts.** `python -m build` from a developer checkout previously allowed local `.venv*/` directories into the sdist when present, producing oversized manual artifacts. Hatch now uses an explicit sdist include/exclude policy, and `.gitignore` ignores `.venv*/`.
 
 ### Docs
 
