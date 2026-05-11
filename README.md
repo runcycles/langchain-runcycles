@@ -282,6 +282,10 @@ agent = create_agent(model="...", tools=[...], middleware=[gate])
 await agent.ainvoke({"messages": [...]})
 ```
 
+### Streaming
+
+`agent.astream(...)` and `agent.astream_events(...)` are fully supported (v0.2.1+). LangChain's `BaseChatModel.ainvoke` consumes the model's streaming generator internally and merges per-chunk `usage_metadata` into the final `AIMessage` before our `awrap_model_call` ever sees it. So `CyclesModelGate.cost_fn` fires exactly once per model turn — on the aggregated total — and `commit_reservation` debits the actual cost in one shot, not per-chunk. Stream cancellations (consumer disconnect, `asyncio.CancelledError`) trigger `release_reservation` via our `except BaseException:` guard. Locked down by `tests/test_model_gate_streaming.py`; full audit in `AUDIT.md#streaming-contract-v021`.
+
 ## Examples
 
 - [`examples/tenant_budget_agent.py`](examples/tenant_budget_agent.py) — single-tenant budget gate with risky-tool denial recovery.
@@ -290,7 +294,6 @@ await agent.ainvoke({"messages": [...]})
 ## Known limitations (v0.2)
 
 - **`CyclesToolGate` reserve mode commits at the configured `estimate`, not actual usage.** Per-tool actual-cost instrumentation (analogous to `CyclesModelGate.cost_fn`) is still on the roadmap; set `estimate` to the worst-case spend per call you're willing to debit, or use `mode="decide"` for policy gating without budget movement.
-- **Streaming verification deferred.** `CyclesModelGate.wrap_model_call` runs once per model turn and the commit fires after the handler returns; we haven't yet shipped explicit tests against `astream`/`astream_events` to confirm the commit waits for stream completion. Tracked on the v0.2.x roadmap (issue #13).
 - **Per-call subject only via the extractor form.** Static `Subject` pins one tenant per middleware instance. For per-tenant/per-agent routing in a multi-tenant deployment, supply a `SubjectExtractor` callable.
 - **Idempotency keys are deterministic only when `tool_call_id` is present.** Keys take the shape `{prefix}-{tool_call_id}` so retries land on the same Cycles reservation. If the upstream omits `tool_call_id`, the middleware synthesizes a fresh `missing-<hex>` id (and logs a warning) — that path is non-deterministic across retries because the synthesis itself is random. Conformant LangChain runtimes always supply `id`.
 

@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-11
+
+Streaming-path verification for `CyclesModelGate` — closes part 2 of [issue #13](https://github.com/runcycles/langchain-runcycles/issues/13). No code changes; tests + docs only.
+
+### Verified
+
+`CyclesModelGate` is streaming-compatible without code changes because LangChain's streaming aggregation happens *inside* `BaseChatModel.ainvoke`, which is called by `_execute_model_async` (`langchain/agents/factory.py:1323`) — the handler our `awrap_model_call` receives. The handler aggregates all streamed chunks into one final `AIMessage` with summed `usage_metadata` before returning the `ModelResponse`. Middleware never sees per-chunk callbacks.
+
+### Added
+
+- **`tests/test_model_gate_streaming.py`** (3 tests) — regression checks locking down the streaming contract on our side:
+  - `test_cost_fn_called_once_when_handler_aggregates_streamed_chunks` — handler internally aggregates 4 chunks into one final message; `cost_fn` fires exactly once. A regression that triggered per-chunk commits would fail this test.
+  - `test_cost_fn_sees_aggregated_usage_metadata_not_first_chunk` — handler sums chunk `usage_metadata` into the final message; the `openai_cost` extractor computes the commit `actual` from the *summed* totals (250_000 microcents), not the first chunk's partial counts (which would be 50_000). Explicit `!=` assertion so a "first-chunk-only" regression fails loudly.
+  - `test_cancellation_during_handler_releases_reservation` — `asyncio.CancelledError` raised inside the handler (consumer disconnects mid-stream) triggers `release_reservation`. CancelledError is a `BaseException`, not `Exception` — this test guards against a future refactor that narrows the `except` clause and silently leaks reservations.
+
+### Coverage
+
+144 tests, 99.59% coverage (gate `fail_under = 95`); `model_gate.py`, `extractors.py` both at 100%.
+
+### Behavior change
+
+None. Pure verification + audit. Existing v0.2.0 callers see no change.
+
+### AUDIT.md
+
+New "Streaming contract (v0.2.1+)" section documents the layered call path from `agent.astream(...)` down to our `awrap_model_call`, with the load-bearing fact: aggregation lives *below* the middleware layer, so we only ever see finalized responses.
+
+### Deferred to a later v0.2.x
+
+- **`examples/multi_agent_fanout.py`** — multi-tenant fan-out + HITL demo agent meeting LangChain's stated co-marketing bar. Tracked separately on #13.
+
 ## [0.2.0] - 2026-05-11
 
 Per-call actual-cost extraction for `CyclesModelGate` — closes the v0.1.x "commits at estimate" gap that prompted the [v0.2.0 issue](https://github.com/runcycles/langchain-runcycles/issues/13). Reserve-mode and `decide+reserve`-mode model calls can now debit Cycles budgets at the model's actual reported token usage, not the worst-case estimate.

@@ -259,7 +259,11 @@ When the gate halts, it returns:
 
 ## Async support
 
-For async agents, pass an `AsyncCyclesClient` and invoke the agent with `.ainvoke()`. The middleware automatically uses the async hooks: `awrap_model_call` on `CyclesModelGate`, `awrap_tool_call` on `CyclesToolGate`, and `abefore_model` on `CyclesFanOutGate`.
+For async agents, pass an `AsyncCyclesClient` and invoke the agent with `.ainvoke()`, `.astream()`, or `.astream_events()`. The middleware automatically uses the async hooks: `awrap_model_call` on `CyclesModelGate`, `awrap_tool_call` on `CyclesToolGate`, and `abefore_model` on `CyclesFanOutGate`.
+
+<Note>
+    `agent.astream(...)` and `agent.astream_events(...)` are fully supported (v0.2.1+). LangChain's `BaseChatModel.ainvoke` consumes the model's streaming generator internally and merges per-chunk `usage_metadata` into the final `AIMessage` before our `awrap_model_call` ever sees it. `CyclesModelGate.cost_fn` fires exactly once per turn — on the aggregated total — and `commit_reservation` debits the actual cost in one shot, not per-chunk. Stream cancellations (consumer disconnect, `asyncio.CancelledError`) trigger `release_reservation` via the gate's `except BaseException:` guard.
+</Note>
 
 ```python Async usage icon="bolt"
 import os
@@ -378,7 +382,9 @@ gate = CyclesToolGate(
 
 Implemented (v0.2.0+): `wrap_model_call` (`CyclesModelGate`), `wrap_tool_call` (`CyclesToolGate`), and `before_model` (`CyclesFanOutGate`): all three hooks of the LangChain agent governance triad. `CyclesModelGate` and `CyclesToolGate` share the same three modes (`decide` / `reserve` / `decide+reserve`), reservation lifecycle, and `settlement_error_policy`. `CyclesModelGate` additionally supports per-call actual-cost extraction via `cost_fn` (v0.2.0+). `CyclesFanOutGate` is a thinner halt-only middleware: it consults `decide()` per turn and counts turns against `max_turns`, but does not reserve, so it shares only the `idempotency_namespace` plumbing with the other two.
 
-Deferred to a later 0.2.x: explicit streaming-path verification (`astream` / `astream_events`) and the `examples/multi_agent_fanout.py` demo agent. The `wrap_model_call` lifecycle already waits for the wrapped handler to return before committing, so streaming should work correctly — but explicit tests are not yet in place. For per-tool token-cost capture today on `CyclesToolGate`, use the `BaseCallbackHandler` callback handler from `cycles-client-python` alongside the middleware (the two compose cleanly).
+Streaming verified in v0.2.1 — see the Async support section above. `agent.astream(...)` and `agent.astream_events(...)` work without code changes because LangChain aggregates per-chunk responses inside `BaseChatModel.ainvoke`, below the middleware layer.
+
+Deferred to a later 0.2.x: the `examples/multi_agent_fanout.py` demo agent. For per-tool token-cost capture today on `CyclesToolGate` (no `cost_fn` yet on the tool gate), use the `BaseCallbackHandler` callback handler from `cycles-client-python` alongside the middleware — the two compose cleanly.
 
 ## API reference
 
