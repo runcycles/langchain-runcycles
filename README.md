@@ -14,7 +14,7 @@ Built on LangChain's [`AgentMiddleware`](https://docs.langchain.com/oss/python/l
 - **`wrap_tool_call`** — tool-call authorization plus optional reserve/commit/release lifecycle around each tool execution
 - **`before_model`** (with `@hook_config(can_jump_to=["end"])`) — fan-out caps and external policy halts before another model turn
 
-Per-call actual-cost extraction (provider-specific token-usage parsing) and streaming integration are v0.2.0 scope. Until then, `CyclesModelGate` commits at the configured `estimate`; for precise per-call token capture today, use the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py).
+Per-call actual-cost extraction is available on `CyclesModelGate` via the `cost_fn` parameter (v0.2.0+): supply a `Callable[[ModelResponse], Amount]` and commits debit at actual provider-reported token usage instead of the configured `estimate`. `langchain_runcycles.extractors` ships `openai_cost` and `anthropic_cost` factories parameterized by per-million-token pricing. For non-agent LangChain code (bare chains, RAG runnables), the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py) remains the right tool.
 
 Install via `pip install langchain-runcycles`.
 
@@ -79,7 +79,7 @@ model_gate = CyclesModelGate(
 )
 ```
 
-> v0.1.5 commits at the configured `estimate`. Per-call actual-cost extraction (token usage from provider response metadata) and streaming integration land in v0.2.0. For precise per-call token cost capture today, use the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py).
+> Add `cost_fn=openai_cost(prompt_per_million_usd=2.50, completion_per_million_usd=10.00)` (or `anthropic_cost(...)`, or a custom `Callable[[ModelResponse], Amount]`) to commit at actual reported token usage instead of `estimate` (v0.2.0+). See the "Actual-cost extraction on `CyclesModelGate`" section below for the full pattern.
 
 ### `CyclesToolGate`
 

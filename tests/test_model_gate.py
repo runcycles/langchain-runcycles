@@ -391,3 +391,33 @@ def test_cost_fn_not_called_in_decide_mode(
     handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
     gate.wrap_model_call(model_request, handler)
     cost.assert_not_called()
+
+
+def test_cost_fn_used_in_decide_reserve_mode(
+    sync_client: CyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """decide+reserve reaches the commit path; cost_fn must drive `actual` there too.
+
+    Locks down the parity between mode='reserve' and mode='decide+reserve' — a
+    silent regression skipping cost_fn in decide+reserve would still allow the
+    test_cost_fn_used_for_commit_actual test to pass."""
+    from runcycles import Amount, Unit
+
+    actual_from_cost_fn = Amount(unit=Unit.USD_MICROCENTS, amount=7_777)
+
+    def cost(_result: Any) -> Amount:
+        return actual_from_cost_fn
+
+    gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="decide+reserve",
+        cost_fn=cost,
+    )
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    gate.wrap_model_call(model_request, handler)
+
+    commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
+    commit_request = commit_args[1]
+    assert commit_request.actual.amount == 7_777

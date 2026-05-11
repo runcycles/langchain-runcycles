@@ -23,7 +23,7 @@ Per-call actual-cost extraction for `CyclesModelGate` — closes the v0.1.x "com
 
 ### Coverage
 
-132 tests, 99.16% coverage (gate `fail_under = 95`). Three new sync cost_fn tests + three async parity tests on `CyclesModelGate`; six tests on the extractors module covering OpenAI/Anthropic shape extraction, zero-token edge cases, missing-usage-metadata fallback, empty-result fallback, fractional-cent rounding, and the keyword-only pricing-arg guard.
+136 tests, 99.58% coverage (gate `fail_under = 95`); `model_gate.py` at 100%. Four new sync cost_fn tests (applied / None-fallback / exception-fallback / decide+reserve parity / not-called-in-decide-mode) + four async parity tests + missing-reservation-id async coverage + awaitable-handler reserve-mode coverage on `CyclesModelGate`; seven tests on the extractors module covering OpenAI/Anthropic shape extraction, zero-token edge cases, missing-usage-metadata fallback, empty-result fallback, fractional-cent rounding, and the keyword-only pricing-arg guard.
 
 ### Behavior change
 

@@ -268,3 +268,68 @@ async def test_async_cost_fn_exception_falls_back_to_estimate(
     assert result is handler_result
 
     assert captured["request"].actual.amount == 42
+
+
+@pytest.mark.asyncio
+async def test_async_cost_fn_used_in_decide_reserve_mode(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """async parity for decide+reserve + cost_fn — the same parity guarantee as the
+    sync test_cost_fn_used_in_decide_reserve_mode."""
+    from runcycles import Amount, Unit
+
+    actual_from_cost_fn = Amount(unit=Unit.USD_MICROCENTS, amount=7_777)
+
+    def cost(_result: Any) -> Amount:
+        return actual_from_cost_fn
+
+    captured: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured)
+
+    gate = CyclesModelGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="decide+reserve",
+        cost_fn=cost,
+    )
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    await gate.awrap_model_call(model_request, handler)
+
+    assert captured["request"].actual.amount == 7_777
+
+
+@pytest.mark.asyncio
+async def test_async_reservation_missing_id_returns_denial(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """async parity for the sync `test_reservation_missing_id_returns_denial`:
+    a successful create_reservation response with no `reservation_id` is treated
+    as a denial — the handler must not run."""
+    async def _create_missing_id(_request: Any) -> CyclesResponse:
+        return CyclesResponse.success(201, {"decision": "ALLOW", "affected_scopes": []})
+
+    async_client.create_reservation = _create_missing_id  # type: ignore[method-assign]
+    gate = CyclesModelGate(async_client, subject=subject, action=action, mode="reserve")
+    handler = MagicMock()
+    result = await gate.awrap_model_call(model_request, handler)
+    assert isinstance(result, ModelResponse)
+    handler.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_handler_returning_awaitable_in_reserve_mode(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """The reserve-mode async path awaits awaitable handler results (line 307).
+    LangChain agents pass an async handler when invoked via .ainvoke(), so this
+    awaitable branch is the real production code path — not just the
+    decide-mode one already covered."""
+    expected = ModelResponse(result=[AIMessage(content="async ok")])
+
+    async def async_handler(_request: Any) -> Any:
+        return expected
+
+    gate = CyclesModelGate(async_client, subject=subject, action=action, mode="reserve")
+    result = await gate.awrap_model_call(model_request, async_handler)
+    assert result is expected

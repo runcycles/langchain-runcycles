@@ -18,7 +18,7 @@
 | SDK methods consumed | 5/5 | 0 |
 | Idempotency-key generation | — | 0 |
 | Reservation lifecycle (reserve → commit/release) | — | 0 |
-| Test coverage gate | ≥95% | 0 (99.16%) |
+| Test coverage gate | ≥95% | 0 (99.58%) |
 
 **Overall: middleware contract is in conformance with the LangChain 1.x API as documented at <https://docs.langchain.com/oss/python/langchain/middleware/custom>.**
 
@@ -112,14 +112,14 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 
 1. Pre-call: `create_reservation` → if not success or no `reservation_id`, return denial — `ToolMessage` for `CyclesToolGate`, `ModelResponse(result=[AIMessage(...)])` for `CyclesModelGate`.
 2. Run handler (the wrapped tool call or model call).
-3. Success: `commit_reservation` (commits at the configured `estimate`; per-call actual-cost instrumentation is left to the caller for v0.1.x — provider-specific token extraction for `CyclesModelGate` is v0.2.0 scope).
+3. Success: `commit_reservation`. For `CyclesModelGate` (v0.2.0+), commits at `cost_fn(result)` if `cost_fn` is supplied (with fallback to `estimate` on extractor error); otherwise commits at `estimate`. For `CyclesToolGate`, always commits at `estimate` (a tool-side `cost_fn` analog is roadmap, not yet shipped).
 4. Exception: `release_reservation`, then re-raise.
 
 **Settlement-failure handling** (v0.1.2+ for tool gate, v0.1.5+ for model gate): if the success-path `commit_reservation` itself raises, behavior is governed by `settlement_error_policy` on `CyclesToolGate` and `CyclesModelGate` — default `"raise"` propagates the commit exception so the caller can reconcile (strict governance); opt-in `"log"` swallows the failure and returns the result (best-effort accounting; reservation expires via TTL). The release path on handler-side exception always logs and continues so the original handler exception wins.
 
 ## Test coverage
 
-- 132 tests across:
+- 136 tests across:
   - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log, idempotency-key determinism, and v0.1.3 namespace static/callable/no-namespace/cross-run-collision)
   - `tests/test_model_gate.py`, `tests/test_model_gate_async.py` — sync + async model-gate paths (v0.1.5+); decide allow/deny, reserve lifecycle, settlement raise/log, namespace, **plus v0.2.0+ `cost_fn` (applied / None-fallback / exception-fallback / decide-mode-skip)**
   - `tests/test_extractors.py` — `openai_cost` / `anthropic_cost` factories (v0.2.0+); computation, zero-token edge, missing-`usage_metadata` raise, empty-`result` raise, fractional-cent rounding, keyword-only-pricing guard

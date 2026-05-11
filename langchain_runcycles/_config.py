@@ -1,8 +1,11 @@
 """Public type aliases for middleware configuration.
 
-These are the shapes users pass when constructing CyclesToolGate / CyclesFanOutGate.
-Subject and action can be supplied as static values, mappings, or callables that
-resolve dynamically from the tool-call request and agent state.
+These are the shapes users pass when constructing CyclesModelGate /
+CyclesToolGate / CyclesFanOutGate. Subject and action can be supplied as
+static values, mappings (action only — subject is static or callable, not
+a mapping), or callables that resolve dynamically from the request and
+agent state. ``CostFn`` is the per-call extractor type for
+``CyclesModelGate.cost_fn`` (v0.2.0+).
 """
 
 from collections.abc import Callable, Mapping
