@@ -87,6 +87,20 @@ def test_negative_token_counts_raise_so_gate_falls_back() -> None:
         cost_fn(response)
 
 
+def test_non_integer_token_values_raise_so_gate_falls_back() -> None:
+    """A non-coercible token value (string that isn't a number, None, etc.) raises
+    with the underlying TypeError/ValueError chained via `from exc`. Locks down the
+    int() coercion guard so a malformed provider response can't slip through and
+    crash the commit path with a less-informative error."""
+    cost_fn = openai_cost(prompt_per_million_usd=2.50, completion_per_million_usd=10.00)
+    response = SimpleNamespace(
+        result=[SimpleNamespace(usage_metadata={"input_tokens": "abc", "output_tokens": 0})]
+    )
+    with pytest.raises(ValueError, match="not an integer token count") as exc_info:
+        cost_fn(response)
+    assert exc_info.value.__cause__ is not None  # `raise ... from exc` chain preserved
+
+
 def test_empty_result_raises_so_gate_falls_back() -> None:
     """An empty ModelResponse.result list is unexpected but possible; raise so the
     fallback-to-estimate path covers it."""
