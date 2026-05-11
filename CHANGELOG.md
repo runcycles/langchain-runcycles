@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Docs
+
+- **README "Settlement (commit) failures" and `docs/runcycles.mdx` "Settlement-failure policy"** now mention `CyclesModelGate` parity and the non-success-`CyclesResponse` failure path. The prose described `settlement_error_policy` as tool-only and exception-only; v0.2.3 already applies it to both gates and both failure modes (raised exceptions and HTTP-failure responses). `AUDIT.md` and `CHANGELOG.md` were already accurate; this is a prose-drift correction with no behavior change.
+
 ## [0.2.3] - 2026-05-11
 
 Correctness patch driven by external review. One real governance bug, two doc fixes, one minor lockdown. No public API change.
