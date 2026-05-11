@@ -293,3 +293,101 @@ def test_release_key_inherits_namespace_on_handler_exception(
     release_key = release_args[1].idempotency_key
     # release-{idem} where idem itself starts with model-res-{namespace}-
     assert re.match(r"^release-model-res-run_abc-[0-9a-f]{32}$", release_key)
+
+
+# --- cost_fn (v0.2.0+) ---------------------------------------------------------------
+
+
+def test_cost_fn_used_for_commit_actual(
+    sync_client: CyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """When cost_fn is supplied, the commit `actual` comes from cost_fn(result), not estimate."""
+    from runcycles import Amount, Unit
+
+    actual_from_cost_fn = Amount(unit=Unit.USD_MICROCENTS, amount=12_345)
+
+    def cost(_result: Any) -> Amount:
+        return actual_from_cost_fn
+
+    gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        cost_fn=cost,
+    )
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    gate.wrap_model_call(model_request, handler)
+
+    commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
+    commit_request = commit_args[1]
+    assert commit_request.actual.amount == 12_345
+    assert commit_request.actual.unit == Unit.USD_MICROCENTS
+
+
+def test_cost_fn_none_commits_at_estimate(
+    sync_client: CyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """Without cost_fn, commit `actual` equals the configured estimate (v0.1.x backward-compat)."""
+    from runcycles import Amount, Unit
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=99_999)
+    gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+    )
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    gate.wrap_model_call(model_request, handler)
+
+    commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
+    commit_request = commit_args[1]
+    assert commit_request.actual.amount == 99_999
+
+
+def test_cost_fn_exception_falls_back_to_estimate(
+    sync_client: CyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """A cost_fn that raises must NOT erase the model result; commit uses estimate instead."""
+    from runcycles import Amount, Unit
+
+    def broken_cost(_result: Any) -> Amount:
+        raise ValueError("provider response shape unrecognized")
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=broken_cost,
+    )
+    handler_result = ModelResponse(result=[AIMessage(content="model output")])
+    handler = MagicMock(return_value=handler_result)
+
+    result = gate.wrap_model_call(model_request, handler)
+    assert result is handler_result  # model result preserved
+
+    commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
+    commit_request = commit_args[1]
+    assert commit_request.actual.amount == 42  # fell back to estimate
+
+
+def test_cost_fn_not_called_in_decide_mode(
+    sync_client: CyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """decide mode has no commit path, so cost_fn must never be invoked."""
+    cost = MagicMock()
+    gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="decide",
+        cost_fn=cost,
+    )
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    gate.wrap_model_call(model_request, handler)
+    cost.assert_not_called()

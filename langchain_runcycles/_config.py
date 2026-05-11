@@ -8,7 +8,7 @@ resolve dynamically from the tool-call request and agent state.
 from collections.abc import Callable, Mapping
 from typing import Any, TypeAlias
 
-from runcycles import Action, Subject
+from runcycles import Action, Amount, Subject
 
 SubjectExtractor: TypeAlias = Callable[[Any, Any], Subject]
 """(request, state) -> Subject. The request is the LangChain ToolCallRequest in tool gates,
@@ -41,3 +41,18 @@ should be globally scoped while others are run-scoped).
 When a non-empty namespace is in effect, keys take the shape
 ``{prefix}-{namespace}-{tool_call_id}``; otherwise the v0.1.2 shape
 ``{prefix}-{tool_call_id}`` is preserved (back-compat)."""
+
+CostFn: TypeAlias = Callable[[Any], Amount]
+"""(model_response) -> Amount. Per-call cost extractor for ``CyclesModelGate`` (v0.2.0+).
+
+When supplied, ``CyclesModelGate`` calls ``cost_fn(result)`` after the model
+handler returns and uses the returned ``Amount`` for ``commit_reservation``
+instead of the configured ``estimate``. The callable receives the
+``ModelResponse`` returned by the wrapped handler so the extractor can pull
+token counts from the response's ``AIMessage.usage_metadata`` (or
+``response_metadata``) and convert to the unit your Cycles budgets use.
+
+If the callable raises, the gate logs a warning and falls back to the
+configured ``estimate`` so a costing bug never erases a successful model
+result. Use the provided ``langchain_runcycles.extractors`` factories for
+OpenAI / Anthropic shapes, or write your own."""

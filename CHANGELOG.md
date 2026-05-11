@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-11
+
+Per-call actual-cost extraction for `CyclesModelGate` — closes the v0.1.x "commits at estimate" gap that prompted the [v0.2.0 issue](https://github.com/runcycles/langchain-runcycles/issues/13). Reserve-mode and `decide+reserve`-mode model calls can now debit Cycles budgets at the model's actual reported token usage, not the worst-case estimate.
+
+### Added
+
+- **`cost_fn` parameter on `CyclesModelGate`.** Optional `Callable[[ModelResponse], Amount]`. When supplied, the middleware calls `cost_fn(result)` after the wrapped model handler returns and uses the returned `Amount` for `commit_reservation` instead of the configured `estimate`. When unset, behavior is identical to v0.1.x (commit-at-estimate). The callable receives the LangChain `ModelResponse` returned by the handler so extractors can pull `usage_metadata` off the contained `AIMessage`.
+- **`langchain_runcycles.extractors` module** with two factory functions:
+  - `openai_cost(prompt_per_million_usd=..., completion_per_million_usd=...)` — returns a `cost_fn` that reads `AIMessage.usage_metadata` and converts to `USD_MICROCENTS` using OpenAI-labeled pricing (prompt/completion).
+  - `anthropic_cost(input_per_million_usd=..., output_per_million_usd=...)` — same shape, Anthropic-labeled pricing (input/output). Both factories take keyword-only pricing args so callers can't accidentally swap input and output rates.
+- **`CostFn` type alias** exported from the package root for type-annotating user-supplied extractors.
+
+### Resilience
+
+- **`cost_fn` exceptions never erase the model result.** If `cost_fn(result)` raises, `CyclesModelGate` logs a warning and falls back to the configured `estimate` for the commit. The model result is still returned to the agent. This means a stale or wrong extractor downgrades the debit accuracy (estimate vs. actual) but never breaks the agent loop. Locked down by `tests/test_model_gate.py::test_cost_fn_exception_falls_back_to_estimate` and the async sibling.
+
+### Coverage
+
+132 tests, 99.16% coverage (gate `fail_under = 95`). Three new sync cost_fn tests + three async parity tests on `CyclesModelGate`; six tests on the extractors module covering OpenAI/Anthropic shape extraction, zero-token edge cases, missing-usage-metadata fallback, empty-result fallback, fractional-cent rounding, and the keyword-only pricing-arg guard.
+
+### Behavior change
+
+`cost_fn` is purely additive. Callers on v0.1.x who don't pass it see no change. Callers who pass it get actual-cost commits instead of estimate-cost commits — a more accurate debit, never a denial path change.
+
+### Deferred to a later v0.2.x
+
+- **Streaming integration verification.** `wrap_model_call` runs once per turn even when the underlying call streams; we need explicit tests confirming the commit fires after the stream is fully consumed. Tracked separately on #13.
+- **`examples/multi_agent_fanout.py`** — the multi-tenant fan-out + HITL demo agent that meets LangChain's stated co-marketing bar. Tracked separately on #13.
+
 ## [0.1.6] - 2026-05-10
 
 Doc cleanup pass. v0.1.5 shipped `CyclesModelGate` but several places in the repo still described the package as "two middleware classes" or "no model-call middleware yet." External review caught the staleness; this release brings the user-visible metadata in line with what the v0.1.5 code actually does. No code changes; behavior is identical to v0.1.5.

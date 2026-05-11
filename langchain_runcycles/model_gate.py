@@ -12,9 +12,17 @@ Wraps every model invocation with a Cycles authorization check. Three modes
   * ``"decide+reserve"`` — authorize via ``decide()`` first, then reserve and
     commit. Most strict.
 
-v0.1.5 commits at the configured ``estimate``. Per-call actual-cost extraction
-(token counts from provider response metadata) is on the v0.2.0 roadmap;
-v0.1.x ModelGate keys also use a UUID per-call slot since model requests
+v0.2.0+ supports per-call actual-cost extraction via the optional ``cost_fn``
+parameter: if supplied, the callable receives the ``ModelResponse`` returned
+by the wrapped handler and returns an ``Amount`` used for the commit. If the
+callable raises, the gate logs a warning and falls back to the configured
+``estimate`` so a costing bug never erases a successful model result.
+Without ``cost_fn`` the gate commits at the configured ``estimate`` (the
+v0.1.x default behavior). ``langchain_runcycles.extractors`` ships
+``openai_cost`` and ``anthropic_cost`` factories that produce a ``cost_fn``
+parameterized by per-million-token pricing.
+
+ModelGate idempotency keys use a UUID per-call slot since model requests
 don't carry an upstream-stable id like ``tool_call_id`` (namespacing still
 works as a run/workflow scope).
 """
@@ -39,6 +47,7 @@ from runcycles import (
 
 from langchain_runcycles._config import (
     ActionConfig,
+    CostFn,
     DenialFormatter,
     IdempotencyNamespace,
     SubjectConfig,
@@ -79,6 +88,7 @@ class CyclesModelGate(AgentMiddleware):
         denial_message: DenialFormatter = "Model call denied by Cycles policy: {reason}",
         settlement_error_policy: SettlementErrorPolicy = "raise",
         idempotency_namespace: IdempotencyNamespace | None = None,
+        cost_fn: CostFn | None = None,
     ) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(f"Invalid mode {mode!r}; expected one of {_VALID_MODES}.")
@@ -102,6 +112,25 @@ class CyclesModelGate(AgentMiddleware):
         self._denial_message = denial_message
         self._settlement_error_policy: SettlementErrorPolicy = settlement_error_policy
         self._idempotency_namespace = idempotency_namespace
+        self._cost_fn = cost_fn
+
+    def _resolve_actual(self, result: Any) -> Amount:
+        """Resolve the commit ``actual`` from cost_fn or fall back to estimate.
+
+        If ``cost_fn`` is unset, return the configured estimate (v0.1.x parity).
+        If it's set and succeeds, return its result. If it raises, log a warning
+        and fall back to the estimate — preserves the model result even when
+        per-call costing breaks for some reason."""
+        if self._cost_fn is None:
+            return self._estimate
+        try:
+            return self._cost_fn(result)
+        except Exception:
+            logger.warning(
+                "cost_fn raised while computing commit amount; falling back to configured estimate",
+                exc_info=True,
+            )
+            return self._estimate
 
     def _resolve_namespace(self, ctx: Any) -> str | None:
         """Resolve the optional namespace for this call. Returns None if disabled."""
@@ -185,12 +214,13 @@ class CyclesModelGate(AgentMiddleware):
             self._safe_release_sync(reservation_id, idem)
             raise
 
+        actual = self._resolve_actual(result)
         try:
             self._client.commit_reservation(
                 reservation_id,
                 CommitRequest(
                     idempotency_key=f"commit-{idem}",
-                    actual=self._estimate,
+                    actual=actual,
                 ),
             )
         except Exception:
@@ -279,12 +309,13 @@ class CyclesModelGate(AgentMiddleware):
             await self._safe_release_async(reservation_id, idem)
             raise
 
+        actual = self._resolve_actual(result)
         try:
             await self._client.commit_reservation(
                 reservation_id,
                 CommitRequest(
                     idempotency_key=f"commit-{idem}",
-                    actual=self._estimate,
+                    actual=actual,
                 ),
             )
         except Exception:

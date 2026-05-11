@@ -169,3 +169,102 @@ async def test_async_namespace_callable_receives_request(
     handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
     await gate.awrap_model_call(request, handler)
     assert re.match(r"^model-decide-async_run_xyz-[0-9a-f]{32}$", captured["key"])
+
+
+# --- cost_fn (v0.2.0+) ---------------------------------------------------------------
+
+
+def _capture_commit_actual(async_client: AsyncCyclesClient, captured: dict[str, Any]) -> None:
+    """Replace async_client.commit_reservation with a wrapper that records
+    the CommitRequest into the captured dict before returning success."""
+    from tests.conftest import commit_ok
+
+    async def _commit(_rid: Any, request: Any) -> Any:
+        captured["request"] = request
+        return commit_ok()
+
+    async_client.commit_reservation = _commit  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_async_cost_fn_used_for_commit_actual(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """async parity: commit `actual` comes from cost_fn(result), not estimate."""
+    from runcycles import Amount, Unit
+
+    actual_from_cost_fn = Amount(unit=Unit.USD_MICROCENTS, amount=12_345)
+
+    def cost(_result: Any) -> Amount:
+        return actual_from_cost_fn
+
+    captured: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured)
+
+    gate = CyclesModelGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        cost_fn=cost,
+    )
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    await gate.awrap_model_call(model_request, handler)
+
+    assert captured["request"].actual.amount == 12_345
+    assert captured["request"].actual.unit == Unit.USD_MICROCENTS
+
+
+@pytest.mark.asyncio
+async def test_async_cost_fn_none_commits_at_estimate(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """async parity: without cost_fn, commit `actual` equals the configured estimate."""
+    from runcycles import Amount, Unit
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=99_999)
+    captured: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured)
+
+    gate = CyclesModelGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+    )
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    await gate.awrap_model_call(model_request, handler)
+
+    assert captured["request"].actual.amount == 99_999
+
+
+@pytest.mark.asyncio
+async def test_async_cost_fn_exception_falls_back_to_estimate(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """async parity: cost_fn that raises must not erase the model result."""
+    from runcycles import Amount, Unit
+
+    def broken_cost(_result: Any) -> Amount:
+        raise ValueError("provider response shape unrecognized")
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    captured: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured)
+
+    gate = CyclesModelGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=broken_cost,
+    )
+    handler_result = ModelResponse(result=[AIMessage(content="model output")])
+    handler = MagicMock(return_value=handler_result)
+
+    result = await gate.awrap_model_call(model_request, handler)
+    assert result is handler_result
+
+    assert captured["request"].actual.amount == 42
