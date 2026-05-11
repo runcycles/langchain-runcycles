@@ -2,12 +2,37 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any
-from unittest.mock import MagicMock
+# Filter upstream import-time warnings before any test module imports happen.
+# pyproject.toml's [tool.pytest.ini_options].filterwarnings activates AFTER
+# collection-time imports, which is too late for warnings fired at langgraph's
+# module top level (langgraph.checkpoint.serde.encrypted instantiates
+# JsonPlusSerializer at class-definition time as a default argument, which
+# triggers langchain-core's deprecation machinery).
+#
+# Filtering by class object is more reliable than by message regex here
+# because langchain-core's deprecation decorator builds the warning via
+# warnings.warn(instance, category=ParentClass, stacklevel=4) which makes the
+# message-regex match brittle.
+import warnings  # noqa: E402
 
-import pytest
-from runcycles import (
+from langchain_core._api.deprecation import (  # noqa: E402
+    LangChainDeprecationWarning,
+    LangChainPendingDeprecationWarning,
+)
+
+warnings.filterwarnings("ignore", category=LangChainPendingDeprecationWarning)
+warnings.filterwarnings("ignore", category=LangChainDeprecationWarning)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Core Pydantic V1 functionality isn't compatible with Python 3\.1[3-9]",
+)
+
+from collections.abc import Iterator  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+import pytest  # noqa: E402
+from runcycles import (  # noqa: E402
     Action,
     AsyncCyclesClient,
     CyclesClient,
