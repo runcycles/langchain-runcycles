@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langchain-runcycles"
-version = "0.2.0"
+version = "0.2.1"
 description = "LangChain agent middleware for Cycles — pre-execution budget authority for model calls, tool calls, and runaway agent loops in Python create_agent workflows."
 readme = "README.md"
 license = "Apache-2.0"
@@ -92,6 +92,21 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Silence upstream-only noise we don't control. Two layers:
+#   1. message-regex filters here, applied at pytest startup, catch warnings
+#      where langchain-core's `warnings.warn(instance, category=ParentClass)`
+#      shadows the instance class — message match is the reliable handle.
+#   2. category filters in tests/conftest.py for completeness.
+filterwarnings = [
+    # langchain-core's pydantic.v1 import is incompatible with Python 3.13/3.14.
+    # Our declared classifier support is 3.10-3.12; this is noise for users on
+    # newer Pythons, not actionable from our code.
+    "ignore:Core Pydantic V1 functionality isn't compatible with Python 3\\.1[3-9]",
+    # langgraph telegraphs a future default change for `allowed_objects` inside
+    # langgraph.checkpoint.serde.encrypted (fires at class-body default-arg
+    # instantiation time). We never construct that serializer directly.
+    "ignore:The default value of `allowed_objects` will change",
+]
 
 [tool.coverage.run]
 source = ["langchain_runcycles"]

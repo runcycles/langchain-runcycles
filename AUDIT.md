@@ -1,7 +1,7 @@
 # langchain-runcycles — Middleware API Conformance Audit
 
 **Date:** 2026-05-10
-**Package:** `langchain-runcycles` v0.2.0
+**Package:** `langchain-runcycles` v0.2.1
 **LangChain target:** `langchain >= 1.0, < 2.0`, `langchain-core >= 1.0, < 2.0` (tested against `langchain==1.2.18`, `langchain-core==1.3.3`, `langgraph==1.1.10`)
 **Cycles SDK target:** `runcycles >= 0.4.1` (tested against `runcycles==0.4.1`, Python 3.10+)
 **Server audit:** Cycles protocol conformance is owned by [`cycles-client-python/AUDIT.md`](https://github.com/runcycles/cycles-client-python/blob/main/AUDIT.md). This document audits this package's contract with the LangChain agent middleware API only.
@@ -18,7 +18,7 @@
 | SDK methods consumed | 5/5 | 0 |
 | Idempotency-key generation | — | 0 |
 | Reservation lifecycle (reserve → commit/release) | — | 0 |
-| Test coverage gate | ≥95% | 0 (141 tests, 99.59%) |
+| Test coverage gate | ≥95% | 0 (144 tests, 99.59%) |
 
 **Overall: middleware contract is in conformance with the LangChain 1.x API as documented at <https://docs.langchain.com/oss/python/langchain/middleware/custom>.**
 
@@ -119,10 +119,11 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 
 ## Test coverage
 
-- 141 tests across:
+- 144 tests across:
   - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log, idempotency-key determinism, and v0.1.3 namespace static/callable/no-namespace/cross-run-collision)
   - `tests/test_model_gate.py`, `tests/test_model_gate_async.py` — sync + async model-gate paths (v0.1.5+); decide allow/deny, reserve lifecycle, settlement raise/log, namespace, **plus v0.2.0+ `cost_fn` (applied / None-fallback / exception-fallback / decide-mode-skip)**
-  - `tests/test_extractors.py` — `openai_cost` / `anthropic_cost` factories (v0.2.0+); computation, zero-token edge, missing-`usage_metadata` raise, empty-`result` raise, fractional-cent rounding, keyword-only-pricing guard
+  - `tests/test_extractors.py` — `openai_cost` / `anthropic_cost` factories (v0.2.0+); computation, zero-token edge, missing-`usage_metadata` raise, missing token fields raise, negative tokens raise, non-coercible token values raise, empty-`result` raise, fractional-cent rounding, keyword-only-pricing guard
+  - `tests/test_model_gate_streaming.py` — streaming-contract verification (v0.2.1+); cost_fn-called-once-per-turn, aggregated-usage-metadata extraction, cancellation-releases-reservation
   - `tests/test_fanout.py`, `tests/test_fanout_async.py` — sync + async fan-out paths (including state-derived idempotency namespace)
   - `tests/test_examples.py` — import smoke for bundled examples
   - `tests/integration/test_live_agent.py` — `create_agent` construction with our middleware against a `FakeMessagesListChatModel`, verifying the AgentMiddleware contract is satisfied at runtime
@@ -153,10 +154,30 @@ Locked down by `tests/test_model_gate.py::test_cost_fn_used_for_commit_actual`, 
 ## Known limitations
 
 - **`CyclesToolGate` reserve mode commits at estimate**, not at actual usage. A `cost_fn` analogous to `CyclesModelGate.cost_fn` is the natural extension — not yet shipped. Locked down by `tests/test_tool_gate.py::test_commit_called_with_configured_estimate`.
-- **Streaming verification deferred to v0.2.x.** `CyclesModelGate.wrap_model_call` is invoked once per model turn and `commit_reservation` fires after the wrapped handler returns; for streaming model calls (`astream`, `astream_events`) the LangChain runtime fully consumes the stream before the handler returns, so the commit *should* see the final response — but we have not yet shipped explicit tests against the streaming code paths. Tracked on issue #13.
+- **Streaming verification shipped in v0.2.1.** See "Streaming contract" section below — the audit + tests in `tests/test_model_gate_streaming.py` close this item.
 - **Single tenant per middleware instance** unless you supply a `SubjectExtractor` callable. Per-call subject resolution is fully supported via the callable form; only the static-Subject convenience is single-tenant.
 - **Synthetic `tool_call_id` when missing.** A `ToolCallRequest` with no `id` field has its denial `ToolMessage` correlated via a fabricated `missing-<12-hex>` id, with a warning logged at `langchain_runcycles._internal`. Because the synthesis is fresh per call, the resulting idempotency key on this fallback path is *not* retry-stable. Conformant LangChain runtimes always supply `id`. Locked down by `tests/test_tool_gate.py::test_synthetic_tool_call_id_when_missing`.
 - **Fan-out gate rejects per-tool action mappings.** `CyclesFanOutGate` gates *model turns*, not tool calls; a per-tool-name `Mapping` for `action` is meaningless there and is rejected at construction with `TypeError`. Locked down by `tests/test_fanout.py::test_fanout_rejects_mapping_action`.
+
+## Streaming contract (v0.2.1+)
+
+`CyclesModelGate` is streaming-compatible without code changes. The aggregation happens *below* the middleware layer:
+
+| Layer | What it does |
+|---|---|
+| `agent.astream(...)` / `agent.ainvoke(...)` | Caller invocation. Both go through the same model-node code path. |
+| `langchain/agents/factory.py:_execute_model_async` (line 1323) | The handler passed into `awrap_model_call`. Calls `await model_.ainvoke(messages)` once. |
+| `BaseChatModel.ainvoke` | Internally calls `agenerate_prompt → agenerate → generate_from_stream` which consumes the model's `_astream` generator and merges all chunks into one final `AIMessage` (with summed `usage_metadata`). |
+| `awrap_model_call(request, handler)` (us) | Receives the finalized `ModelResponse(result=[final_aimessage], ...)`. Calls `cost_fn(result)` exactly once. |
+
+Implications for `CyclesModelGate`:
+
+- `cost_fn` fires **once per model turn**, not per streamed chunk. Locked down by `tests/test_model_gate_streaming.py::test_cost_fn_called_once_when_handler_aggregates_streamed_chunks`.
+- `cost_fn` reads from the **final aggregated** `AIMessage.usage_metadata`. Provider chat-model classes (`langchain-openai`, `langchain-anthropic`) accumulate per-chunk token counts inside `_astream` and stamp totals onto the final message; our extractors see those totals, not partial chunk counts. Locked down by `::test_cost_fn_sees_aggregated_usage_metadata_not_first_chunk`.
+- `commit_reservation` fires **once per turn**, with `actual = cost_fn(final_result)` (or `estimate` on extractor failure).
+- **Stream interruption** (consumer disconnect, `asyncio.CancelledError`) raises out of `await handler(request)` and is caught by our `except BaseException:` guard, triggering `release_reservation`. Locked down by `::test_cancellation_during_handler_releases_reservation`. CancelledError is a `BaseException` (not `Exception`) — narrowing the except clause would silently leak reservations on every cancelled stream.
+
+Reference: `langchain==1.2.18`. If a future LangChain release passes per-chunk callbacks into `awrap_model_call` or changes the aggregation point, the regression tests will fail and we adapt.
 
 ## Settlement error policy (v0.1.2+ tool gate, v0.1.5+ model gate)
 
