@@ -29,10 +29,10 @@ All three work with sync or async LangChain agents and the sync (`CyclesClient`)
 ## Installation
 
 ```bash
-pip install langchain-runcycles
+pip install langchain-runcycles langchain-anthropic
 ```
 
-Requires Python 3.10+ and `langchain >= 1.0`.
+Requires Python 3.10+ and `langchain >= 1.0`. The quick start below uses Claude, so install `langchain-anthropic` too and set `ANTHROPIC_API_KEY`.
 
 ## Quick Start
 
@@ -241,8 +241,9 @@ gate = CyclesToolGate(
 ## Error handling
 
 - **Denied tool calls** return a `ToolMessage` with the denial content; the underlying handler is never invoked. The agent's model sees the denial as if a tool returned an error and can recover.
-- **Reservation failures** in `"reserve"` mode are returned as `ToolMessage` (handler not invoked).
-- **Tool exceptions** in `"reserve"` mode trigger an automatic `release_reservation`, then the exception propagates.
+- **Denied model calls** return a `ModelResponse` with an `AIMessage` carrying the denial reason, so the agent loop terminates naturally.
+- **Reservation failures** in `"reserve"` mode are returned as `ToolMessage` for `CyclesToolGate` or `ModelResponse` for `CyclesModelGate` (handler not invoked).
+- **Handler exceptions** in `"reserve"` mode trigger an automatic `release_reservation`, then the exception propagates.
 - **Async/sync mismatch** raises `TypeError` — pair `CyclesClient` with `.invoke()` and `AsyncCyclesClient` with `.ainvoke()`.
 
 ### Settlement (commit) failures

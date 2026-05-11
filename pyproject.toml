@@ -43,6 +43,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Framework :: AsyncIO",
@@ -79,6 +81,32 @@ dev = [
 target-version = "py310"
 line-length = 120
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/langchain_runcycles",
+    "/tests",
+    "/examples",
+    "/docs",
+    "/AUDIT.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/MAINTAINERS.md",
+    "/README.md",
+    "/pyproject.toml",
+]
+exclude = [
+    "/.venv*/",
+    "/.pytest_cache/",
+    "/.mypy_cache/",
+    "/.ruff_cache/",
+    "/build/",
+    "/dist/",
+    "/.coverage",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["langchain_runcycles"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
@@ -99,8 +127,7 @@ asyncio_mode = "auto"
 #   2. category filters in tests/conftest.py for completeness.
 filterwarnings = [
     # langchain-core's pydantic.v1 import is incompatible with Python 3.13/3.14.
-    # Our declared classifier support is 3.10-3.12; this is noise for users on
-    # newer Pythons, not actionable from our code.
+    # This is upstream noise on newer Pythons, not actionable from our code.
     "ignore:Core Pydantic V1 functionality isn't compatible with Python 3\\.1[3-9]",
     # langgraph telegraphs a future default change for `allowed_objects` inside
     # langgraph.checkpoint.serde.encrypted (fires at class-body default-arg

@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Source distributions now exclude local virtualenv/cache/build artifacts.** `python -m build` from a developer checkout previously allowed local `.venv-*` directories into the sdist when present, producing oversized manual artifacts. Hatch now uses an explicit sdist include/exclude policy, and `.gitignore` ignores `.venv*/`.
+
 ### Docs
 
 - **README "Settlement (commit) failures" and `docs/runcycles.mdx` "Settlement-failure policy"** now mention `CyclesModelGate` parity and the non-success-`CyclesResponse` failure path. The prose described `settlement_error_policy` as tool-only and exception-only; v0.2.3 already applies it to both gates and both failure modes (raised exceptions and HTTP-failure responses). `AUDIT.md` and `CHANGELOG.md` were already accurate; this is a prose-drift correction with no behavior change.
+- **README setup and error-handling guidance** now matches the current examples and implementation: the Claude quick start installs `langchain-anthropic` and calls out `ANTHROPIC_API_KEY`, and the error-handling bullets cover both tool-gate and model-gate denial/reservation/handler-exception shapes.
 
 ## [0.2.3] - 2026-05-11
 
