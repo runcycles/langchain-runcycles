@@ -395,7 +395,7 @@ def test_settlement_log_swallows_commit_failure(
     with _capture_warnings("langchain_runcycles.tool_gate") as logs:
         result = gate.wrap_tool_call(tool_call_request, lambda r: "tool ran")
     assert result == "tool ran"
-    assert any("commit failed" in r.getMessage() for r in logs)
+    assert any("commit raised" in r.getMessage() for r in logs)
 
 
 def test_invalid_settlement_policy_raises(sync_client: CyclesClient, subject: Any, action: Any) -> None:
@@ -595,3 +595,85 @@ def _capture_warnings(logger_name: str):  # type: ignore[no-untyped-def]
     finally:
         log.removeHandler(handler)
         log.setLevel(previous_level)
+
+
+# --- v0.2.3 HTTP-failure handling on settlement paths ----------------------------------
+
+
+def test_commit_http_failure_raise_default_propagates(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """A non-success commit response (CyclesResponse.http_error) must trigger the
+    same settlement_error_policy as a raised exception. Previously the response
+    status was discarded and the failed commit silently treated as success.
+
+    Locks down the v0.2.3 fix for the documented governance contract."""
+    from tests.conftest import commit_failure
+
+    sync_client.commit_reservation.return_value = commit_failure()  # type: ignore[attr-defined]
+    gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="reserve")
+    with pytest.raises(RuntimeError, match="HTTP failure"):
+        gate.wrap_tool_call(tool_call_request, lambda r: "tool ran")
+
+
+def test_commit_http_failure_log_swallows(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """settlement_error_policy='log' applies to HTTP-failure responses too,
+    not just raised exceptions. Tool result is preserved."""
+    from tests.conftest import commit_failure
+
+    sync_client.commit_reservation.return_value = commit_failure()  # type: ignore[attr-defined]
+    gate = CyclesToolGate(
+        sync_client, subject=subject, action=action, mode="reserve", settlement_error_policy="log"
+    )
+    with _capture_warnings("langchain_runcycles.tool_gate") as logs:
+        result = gate.wrap_tool_call(tool_call_request, lambda r: "tool ran")
+    assert result == "tool ran"
+    assert any("commit returned HTTP failure" in r.getMessage() for r in logs)
+
+
+def test_release_http_failure_logged(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """A non-success release response is best-effort — it must be logged but never
+    raised, regardless of settlement_error_policy (release path is cleanup-only)."""
+    from tests.conftest import release_failure
+
+    sync_client.release_reservation.return_value = release_failure()  # type: ignore[attr-defined]
+    gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="reserve")
+
+    def boom(_r: Any) -> Any:
+        raise RuntimeError("tool failed")
+
+    with _capture_warnings("langchain_runcycles.tool_gate") as logs:
+        with pytest.raises(RuntimeError, match="tool failed"):
+            gate.wrap_tool_call(tool_call_request, boom)
+    # The original tool RuntimeError wins (release-failure does not mask it),
+    # but the release HTTP failure is logged so it's visible in operator audit.
+    assert any("release returned HTTP failure" in r.getMessage() for r in logs)
+
+
+# --- v0.2.3 LOW: explicit None tool_call_id uses synthetic path ------------------------
+
+
+def test_explicit_none_tool_call_id_uses_synthetic_path(
+    sync_client: CyclesClient, subject: Any, action: Any
+) -> None:
+    """A tool_call dict with `id=None` (explicit None value) must flow through the
+    synthetic missing-<hex> path, not become the literal string "None".
+
+    Previously `str(tool_call.get("id", ""))` produced "None" (truthy) when the key
+    was present with value None, bypassing coerce_tool_call_id and creating
+    deterministic `decide-None` idempotency-key collisions across malformed calls.
+    """
+    import re
+
+    request = FakeToolCallRequest(call_id=None)  # type: ignore[arg-type]
+    sync_client.decide.return_value = deny_response("X")  # type: ignore[attr-defined]
+    gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="decide")
+    result = gate.wrap_tool_call(request, lambda r: "never")
+    assert isinstance(result, ToolMessage)
+    # The synthesized id must match the missing-<hex> pattern, NOT the literal "None"
+    assert re.match(r"^missing-[0-9a-f]{12}$", result.tool_call_id)
+    assert result.tool_call_id != "None"

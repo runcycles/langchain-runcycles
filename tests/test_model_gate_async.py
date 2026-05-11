@@ -171,6 +171,89 @@ async def test_async_namespace_callable_receives_request(
     assert re.match(r"^model-decide-async_run_xyz-[0-9a-f]{32}$", captured["key"])
 
 
+# --- v0.2.3 HTTP-failure handling on settlement paths ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_commit_http_failure_raise_default_propagates(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    model_request: FakeModelRequest,
+) -> None:
+    """async parity: non-success commit response triggers settlement_error_policy."""
+    from tests.conftest import commit_failure
+
+    async def failing_commit(_rid: Any, _req: Any) -> CyclesResponse:
+        return commit_failure()
+
+    async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
+    gate = CyclesModelGate(async_client, subject=subject, action=action, mode="reserve")
+    handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
+    with pytest.raises(RuntimeError, match="HTTP failure"):
+        await gate.awrap_model_call(model_request, handler)
+
+
+@pytest.mark.asyncio
+async def test_async_commit_http_failure_log_swallows(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    model_request: FakeModelRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """async parity: log policy swallows HTTP-failure commits."""
+    import logging
+
+    from tests.conftest import commit_failure
+
+    async def failing_commit(_rid: Any, _req: Any) -> CyclesResponse:
+        return commit_failure()
+
+    async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
+    gate = CyclesModelGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        settlement_error_policy="log",
+    )
+    handler_result = ModelResponse(result=[AIMessage(content="model output")])
+    handler = MagicMock(return_value=handler_result)
+    with caplog.at_level(logging.WARNING, logger="langchain_runcycles.model_gate"):
+        result = await gate.awrap_model_call(model_request, handler)
+    assert result is handler_result
+    assert "commit returned HTTP failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_async_release_http_failure_logged(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    model_request: FakeModelRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """async parity: non-success release is logged, never raised."""
+    import logging
+
+    from tests.conftest import release_failure
+
+    async def failing_release(_rid: Any, _req: Any) -> CyclesResponse:
+        return release_failure()
+
+    async_client.release_reservation = failing_release  # type: ignore[method-assign]
+    gate = CyclesModelGate(async_client, subject=subject, action=action, mode="reserve")
+
+    def boom(_r: Any) -> Any:
+        raise RuntimeError("model failed")
+
+    with caplog.at_level(logging.WARNING, logger="langchain_runcycles.model_gate"):
+        with pytest.raises(RuntimeError, match="model failed"):
+            await gate.awrap_model_call(model_request, boom)
+    assert "release returned HTTP failure" in caplog.text
+
+
 # --- cost_fn (v0.2.0+) ---------------------------------------------------------------
 
 

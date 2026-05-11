@@ -8,10 +8,10 @@ A LangChain agent gated by Cycles. Two scenarios:
 
 Run::
 
-    pip install langchain-runcycles langchain langchain-openai
+    pip install langchain-runcycles langchain langchain-anthropic
     export CYCLES_BASE_URL=http://localhost:7878
     export CYCLES_API_KEY=...
-    export OPENAI_API_KEY=...
+    export ANTHROPIC_API_KEY=...
     python tenant_budget_agent.py
 """
 

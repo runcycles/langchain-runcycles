@@ -74,6 +74,24 @@ def commit_ok() -> CyclesResponse:
     return CyclesResponse.success(200, {"status": "COMMITTED", "charged": {"unit": "USD_MICROCENTS", "amount": 10000}})
 
 
+def commit_failure() -> CyclesResponse:
+    """HTTP-failure commit response (e.g., 5xx from Cycles server, transient outage).
+
+    Used by v0.2.3+ regression tests for the settlement_error_policy contract on
+    non-success commit responses (previously the gate silently treated HTTP
+    failures as success)."""
+    return CyclesResponse.http_error(
+        503, "Service unavailable", {"error": "SERVICE_UNAVAILABLE", "message": "downstream timeout"}
+    )
+
+
+def release_failure() -> CyclesResponse:
+    """HTTP-failure release response. Best-effort cleanup; never raises, always logs."""
+    return CyclesResponse.http_error(
+        500, "Internal server error", {"error": "INTERNAL", "message": "release path failed"}
+    )
+
+
 def release_ok() -> CyclesResponse:
     return CyclesResponse.success(200, {"status": "RELEASED", "released": {"unit": "USD_MICROCENTS", "amount": 10000}})
 
