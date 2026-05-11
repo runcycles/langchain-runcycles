@@ -247,26 +247,31 @@ gate = CyclesToolGate(
 
 ### Settlement (commit) failures
 
-In `"reserve"` and `"decide+reserve"` modes, the tool runs first, then the reservation is committed. If the commit call itself fails (network blip, server overload, etc.), the tool already ran — its side effect is real. You have two reasonable options, controlled by `settlement_error_policy`:
+In `"reserve"` and `"decide+reserve"` modes, the gated handler (tool call or model call) runs first, then the reservation is committed. If commit fails — either by **raising an exception** (network blip, server unreachable) or by **returning a non-success `CyclesResponse`** (4xx/5xx from the Cycles server) — the handler already ran and its result/side-effect is real. `settlement_error_policy` on **both `CyclesToolGate` and `CyclesModelGate`** controls what happens next, identically across both gates and both failure modes:
 
 | Policy | Behavior | When to choose |
 |---|---|---|
-| `"raise"` (default) | Propagate the commit exception to the agent. The tool's return value is lost. | Strict governance — no tool-level cost can go unaccounted. |
-| `"log"` | Log a warning, return the tool result anyway. The reservation will eventually expire via TTL. | UX-first — keep the agent moving, accept best-effort accounting. |
+| `"raise"` (default) | Propagate the failure: original exception on raised path, `RuntimeError` carrying the server's `denial_reason` on the non-success-response path. Handler result is lost. | Strict governance — no handler-level cost can go unaccounted. |
+| `"log"` | Log a warning, return the handler result anyway. The reservation will eventually expire via TTL. | UX-first — keep the agent moving, accept best-effort accounting. |
 
 ```python
-gate = CyclesToolGate(
-    client,
-    subject=...,
-    action=...,
+# Same parameter on both gates:
+tool_gate = CyclesToolGate(
+    client, subject=..., action=...,
     mode="reserve",
     settlement_error_policy="log",   # opt out of strict default
 )
+
+model_gate = CyclesModelGate(
+    client, subject=..., action=...,
+    mode="reserve",
+    settlement_error_policy="log",
+)
 ```
 
-**Trade-off worth understanding:** `"raise"` surfaces the commit failure as a tool exception, so a LangChain agent may retry — at which point the tool's side effect (e.g. an email send, a payment, a CRM write) **repeats**. Choose `"log"` if your tool's side effects are not safely idempotent on retry.
+**Trade-off worth understanding:** `"raise"` surfaces the commit failure to the agent, which may retry — at which point the handler's side effect (e.g. an email send, a payment, a CRM write, or a paid model call) **repeats**. Choose `"log"` if your handler's side effects are not safely idempotent on retry.
 
-This only affects commit (success-path settlement); release on tool failure always logs and continues so the original tool exception wins.
+This only affects commit (success-path settlement); release on handler failure always logs and continues so the original handler exception wins.
 
 ## Async support
 
