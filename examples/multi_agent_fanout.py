@@ -1,29 +1,38 @@
-"""multi_agent_fanout.py — multi-agent / HITL flow with budget enforcement.
+"""multi_agent_fanout.py — composing the full agent governance triad.
 
-A research agent that spawns subagents to investigate a topic. Each subagent
-makes one or two tool calls. The pattern is interesting because it stress-tests
-both middleware in a realistic shape:
+A research agent that fans out across subagents to investigate a topic, then
+drafts an email a human must approve before sending. The pattern stress-tests
+all three Cycles middleware classes plus LangChain's built-in
+``HumanInTheLoopMiddleware`` in a realistic multi-tenant shape:
 
-  * ``CyclesFanOutGate`` caps the number of model turns per run, preventing
-    runaway loops or unbounded sub-agent fan-out.
-  * ``CyclesToolGate`` (in ``decide+reserve`` mode) gates every tool call,
-    reserving budget per call and committing on success — so a half-finished
-    run leaves no orphan reservations.
-  * A ``HumanInTheLoopMiddleware`` from LangChain inserts a confirmation step
-    before any ``send_email`` call. Cycles authorizes the call separately;
-    HITL is the human approval layer.
+  * :class:`CyclesFanOutGate` caps the number of model turns per run,
+    halting runaway loops or unbounded sub-agent fan-out before they consume
+    further model spend.
+  * :class:`CyclesModelGate` (v0.1.5+) gates each LLM call. With a
+    ``cost_fn`` from :mod:`langchain_runcycles.extractors` (v0.2.0+), commits
+    debit at the model's actual reported token usage — not a worst-case
+    estimate — so per-tenant accounting matches what the provider billed you.
+  * :class:`CyclesToolGate` (in ``decide+reserve`` mode) gates every tool
+    call, reserving budget per call and committing on success — so a
+    half-finished run leaves no orphan reservations.
+  * :class:`HumanInTheLoopMiddleware` inserts a confirmation step before
+    ``send_email``. Cycles authorizes the policy and budget; HITL is the
+    human approval layer. The two compose cleanly: a denial from Cycles
+    short-circuits before HITL is even asked; an HITL rejection releases
+    the Cycles reservation cleanly.
 
-This example is the kind of complex end-to-end LangGraph workflow that
-LangChain's co-marketing guidelines call out as promotion-worthy: long
-horizon, multi-agent, HITL, with non-trivial failure modes (budget runs out
-mid-run; one subagent's denial does not crash the whole run).
+This example deliberately matches LangChain's stated co-marketing bar —
+multi-agent, HITL, multi-tenant, non-trivial failure modes (per-tenant
+budget exhaustion mid-run, individual tool denials that don't crash the
+whole run). See ``examples/multi_agent_fanout_writeup.md`` for the
+problem-framed pattern walkthrough.
 
 Run::
 
-    pip install langchain-runcycles langchain langchain-openai
+    pip install langchain-runcycles langchain langchain-anthropic
     export CYCLES_BASE_URL=http://localhost:7878
     export CYCLES_API_KEY=...
-    export OPENAI_API_KEY=...
+    export ANTHROPIC_API_KEY=...
     python multi_agent_fanout.py
 """
 
@@ -35,9 +44,10 @@ from typing import Any
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_core.tools import tool
-from runcycles import Action, CyclesClient, CyclesConfig, Subject
+from runcycles import Action, Amount, CyclesClient, CyclesConfig, Subject, Unit
 
-from langchain_runcycles import CyclesFanOutGate, CyclesToolGate
+from langchain_runcycles import CyclesFanOutGate, CyclesModelGate, CyclesToolGate
+from langchain_runcycles.extractors import anthropic_cost
 
 # --- tools ---
 
@@ -69,7 +79,7 @@ def spawn_subagent(query: str) -> str:
 
 # --- subject + action mapping ---
 
-ACTION_MAP = {
+TOOL_ACTION_MAP = {
     "search": Action(kind="tool.call", name="search"),
     "summarize": Action(kind="tool.call", name="summarize"),
     "send_email": Action(kind="tool.call", name="send_email"),
@@ -78,7 +88,12 @@ ACTION_MAP = {
 
 
 def per_tenant_subject(_request: Any, state: Any) -> Subject:
-    """Resolve the subject from agent state — supports per-run tenant context."""
+    """Resolve the subject from agent state — supports per-run tenant context.
+
+    Each tenant gets their own budget scope on the Cycles server: a tenant who
+    has burned through their daily research budget gets denied at decide()
+    without ever reaching the model. The same agent process can serve many
+    tenants concurrently because subject resolution happens per-call."""
     tenant: str = "acme"
     if isinstance(state, dict):
         cfg = state.get("config") or {}
@@ -87,6 +102,7 @@ def per_tenant_subject(_request: Any, state: Any) -> Subject:
 
 
 def build_agent() -> object:
+    """Build the multi-tenant research agent with the full governance triad."""
     client = CyclesClient(
         CyclesConfig(
             base_url=os.environ.get("CYCLES_BASE_URL", "http://localhost:7878"),
@@ -94,13 +110,9 @@ def build_agent() -> object:
         )
     )
 
-    tool_gate = CyclesToolGate(
-        client,
-        subject=per_tenant_subject,
-        action=ACTION_MAP,
-        mode="decide+reserve",
-    )
-
+    # Gate 1: per-turn fan-out cap. Cheapest gate — counts AIMessages locally and
+    # only calls decide() when a Cycles client is supplied. Halts before another
+    # model turn so runaway agents can't burn the model budget below.
     fanout_gate = CyclesFanOutGate(
         max_turns=20,
         client=client,
@@ -112,14 +124,46 @@ def build_agent() -> object:
         ),
     )
 
+    # Gate 2: per-model-call authorization + actual-cost commit. The model gate
+    # reserves the worst-case estimate before the LLM call, then commits at the
+    # provider-reported actual token cost via cost_fn — so budget accounting
+    # matches your Anthropic invoice line-by-line.
+    model_gate = CyclesModelGate(
+        client,
+        subject=per_tenant_subject,
+        action=Action(kind="llm.completion", name="claude-sonnet-4-6"),
+        mode="reserve",
+        estimate=Amount(unit=Unit.USD_MICROCENTS, amount=2_500_000),  # $0.025 headroom
+        cost_fn=anthropic_cost(
+            # claude-sonnet-4-6 pricing (2026-05): $3.00/M input, $15.00/M output.
+            input_per_million_usd=3.00,
+            output_per_million_usd=15.00,
+        ),
+    )
+
+    # Gate 3: per-tool authorization. decide+reserve mode runs decide() first
+    # (cheap policy check) and only reserves budget if the tool is allowed.
+    tool_gate = CyclesToolGate(
+        client,
+        subject=per_tenant_subject,
+        action=TOOL_ACTION_MAP,
+        mode="decide+reserve",
+    )
+
+    # HITL gate: human approval on the side-effecting tool. Cycles' authorization
+    # short-circuits BEFORE HITL is asked, so the human is never prompted for a
+    # tool the budget can't afford anyway.
     hitl = HumanInTheLoopMiddleware(
         interrupt_on={"send_email": True},
     )
 
+    # Composition order: fan-out (cheapest) → model (next-cheapest, before LLM
+    # spend) → tool (before tool side effects) → HITL (last, before the action
+    # actually happens).
     return create_agent(
         model=os.environ.get("MODEL", "claude-sonnet-4-6"),
         tools=[search, summarize, send_email, spawn_subagent],
-        middleware=[fanout_gate, tool_gate, hitl],
+        middleware=[fanout_gate, model_gate, tool_gate, hitl],
     )
 
 

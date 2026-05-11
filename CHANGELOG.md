@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-05-11
+
+Final piece of [issue #13](https://github.com/runcycles/langchain-runcycles/issues/13): the multi-agent / HITL / multi-tenant demo that meets LangChain's co-marketing bar. No library code change; example + write-up only.
+
+### Added
+
+- **`examples/multi_agent_fanout.py`** rewritten to compose the **full v0.2.x governance triad**: `CyclesFanOutGate` + `CyclesModelGate` (with `anthropic_cost` extractor for actual-cost commits) + `CyclesToolGate` (in `decide+reserve` mode) + LangChain's `HumanInTheLoopMiddleware` on `send_email`. Composition order is documented inline (fan-out → model → tool → HITL, cheapest gate first). Per-tenant subject resolution via callable so the same agent process serves many tenants with independent budgets.
+- **`examples/multi_agent_fanout_writeup.md`** — a problem-framed pattern walkthrough leading with "pre-execution budget authority for multi-tenant agents," with the demo as a concrete proof point. Three failure-mode scenarios (full-budget tenant, fully-denied tenant, partially-allowed tenant) demonstrate how each gate independently saves the cost of everything downstream. Companion artifact for LangChain co-marketing per their stated "educational, problem-framed, multi-agent / HITL" preference.
+
+### Changed
+
+- **README "Examples" section** now describes the demo with all three gates named, links the write-up.
+
+### Coverage
+
+144 tests, 99.59% coverage (gate `fail_under = 95`). `tests/test_examples.py` import-smoke continues to gate both bundled examples on every CI run.
+
+### Closes
+
+Issue #13 in full: parts 1 (cost_fn + extractors), 2 (streaming verification), and 3 (demo agent + write-up) all landed across v0.2.0, v0.2.1, and v0.2.2. v0.2.x line is feature-complete for the original v0.2.0 scope.
+
 ## [0.2.1] - 2026-05-11
 
 Streaming-path verification for `CyclesModelGate` — closes part 2 of [issue #13](https://github.com/runcycles/langchain-runcycles/issues/13). No code changes; tests + docs only.

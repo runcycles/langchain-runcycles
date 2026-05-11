@@ -384,7 +384,7 @@ Implemented (v0.2.0+): `wrap_model_call` (`CyclesModelGate`), `wrap_tool_call` (
 
 Streaming verified in v0.2.1 — see the Async support section above. `agent.astream(...)` and `agent.astream_events(...)` work without code changes because LangChain aggregates per-chunk responses inside `BaseChatModel.ainvoke`, below the middleware layer.
 
-Deferred to a later 0.2.x: the `examples/multi_agent_fanout.py` demo agent. For per-tool token-cost capture today on `CyclesToolGate` (no `cost_fn` yet on the tool gate), use the `BaseCallbackHandler` callback handler from `cycles-client-python` alongside the middleware — the two compose cleanly.
+The multi-agent demo agent shipped in v0.2.2 — see [`examples/multi_agent_fanout.py`](https://github.com/runcycles/langchain-runcycles/blob/main/examples/multi_agent_fanout.py) and the companion [pattern walkthrough](https://github.com/runcycles/langchain-runcycles/blob/main/examples/multi_agent_fanout_writeup.md). For per-tool token-cost capture today on `CyclesToolGate` (no `cost_fn` yet on the tool gate), use the `BaseCallbackHandler` callback handler from `cycles-client-python` alongside the middleware — the two compose cleanly.
 
 ## API reference
 

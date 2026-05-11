@@ -289,7 +289,7 @@ await agent.ainvoke({"messages": [...]})
 ## Examples
 
 - [`examples/tenant_budget_agent.py`](examples/tenant_budget_agent.py) — single-tenant budget gate with risky-tool denial recovery.
-- [`examples/multi_agent_fanout.py`](examples/multi_agent_fanout.py) — multi-agent / HITL flow with `CyclesToolGate` + `CyclesFanOutGate` + `HumanInTheLoopMiddleware`.
+- [`examples/multi_agent_fanout.py`](examples/multi_agent_fanout.py) — multi-tenant research-and-publish agent composing all three Cycles gates (`CyclesFanOutGate` + `CyclesModelGate` with `anthropic_cost` extractor + `CyclesToolGate`) plus LangChain's `HumanInTheLoopMiddleware`. See [`examples/multi_agent_fanout_writeup.md`](examples/multi_agent_fanout_writeup.md) for the pattern walkthrough.
 
 ## Known limitations (v0.2)
 
