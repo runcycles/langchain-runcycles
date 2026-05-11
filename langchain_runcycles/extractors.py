@@ -39,11 +39,11 @@ from runcycles import Amount, Unit
 
 from langchain_runcycles._config import CostFn
 
-# 1 USD = 100 cents = 10_000_000 micro-cents (10⁻⁸ USD per micro-cent).
+# 1 USD = 100 cents = 100_000_000 micro-cents (10⁻⁸ USD per micro-cent).
 _USD_TO_MICROCENTS = 100_000_000
 
 
-def _extract_usage(result: Any) -> dict[str, int]:
+def _extract_usage(result: Any) -> dict[str, Any]:
     """Pull ``usage_metadata`` off the first ``AIMessage`` in a ``ModelResponse``.
 
     Raises ``ValueError`` if the shape isn't recognized so the caller's
@@ -60,6 +60,27 @@ def _extract_usage(result: Any) -> dict[str, int]:
             "extractor cannot compute actual cost."
         )
     return usage
+
+
+def _token_count(usage: dict[str, Any], key: str) -> int:
+    """Read a required non-negative token count from usage_metadata."""
+    if key not in usage:
+        raise ValueError(
+            f"AIMessage.usage_metadata missing {key!r}; extractor cannot compute actual cost."
+        )
+    try:
+        tokens = int(usage[key])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"AIMessage.usage_metadata[{key!r}] is not an integer token count; "
+            "extractor cannot compute actual cost."
+        ) from exc
+    if tokens < 0:
+        raise ValueError(
+            f"AIMessage.usage_metadata[{key!r}] must be non-negative; "
+            "extractor cannot compute actual cost."
+        )
+    return tokens
 
 
 def openai_cost(
@@ -81,8 +102,8 @@ def openai_cost(
 
     def _cost_fn(result: Any) -> Amount:
         usage = _extract_usage(result)
-        input_tokens = int(usage.get("input_tokens", 0))
-        output_tokens = int(usage.get("output_tokens", 0))
+        input_tokens = _token_count(usage, "input_tokens")
+        output_tokens = _token_count(usage, "output_tokens")
         usd = (
             input_tokens * prompt_per_million_usd
             + output_tokens * completion_per_million_usd
@@ -109,8 +130,8 @@ def anthropic_cost(
 
     def _cost_fn(result: Any) -> Amount:
         usage = _extract_usage(result)
-        input_tokens = int(usage.get("input_tokens", 0))
-        output_tokens = int(usage.get("output_tokens", 0))
+        input_tokens = _token_count(usage, "input_tokens")
+        output_tokens = _token_count(usage, "output_tokens")
         usd = (
             input_tokens * input_per_million_usd
             + output_tokens * output_per_million_usd

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from langchain.agents.middleware import ModelResponse
 from langchain_core.messages import AIMessage
@@ -62,6 +64,26 @@ def test_missing_usage_metadata_raises_so_gate_falls_back() -> None:
     msg = AIMessage(content="ok")  # no usage_metadata
     response = ModelResponse(result=[msg])
     with pytest.raises(ValueError, match="usage_metadata"):
+        cost_fn(response)
+
+
+def test_missing_token_fields_raise_so_gate_falls_back() -> None:
+    """If the normalized usage dict is present but missing required token keys,
+    raise instead of silently treating them as zero."""
+    cost_fn = openai_cost(prompt_per_million_usd=2.50, completion_per_million_usd=10.00)
+    response = SimpleNamespace(result=[SimpleNamespace(usage_metadata={"total_tokens": 10})])
+    with pytest.raises(ValueError, match="input_tokens"):
+        cost_fn(response)
+
+
+def test_negative_token_counts_raise_so_gate_falls_back() -> None:
+    """Provider token counts should never be negative; raise so the gate can
+    fall back to estimate instead of committing an invalid debit."""
+    cost_fn = anthropic_cost(input_per_million_usd=3.00, output_per_million_usd=15.00)
+    response = SimpleNamespace(
+        result=[SimpleNamespace(usage_metadata={"input_tokens": -1, "output_tokens": 0})]
+    )
+    with pytest.raises(ValueError, match="non-negative"):
         cost_fn(response)
 
 

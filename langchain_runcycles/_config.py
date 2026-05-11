@@ -55,7 +55,7 @@ instead of the configured ``estimate``. The callable receives the
 token counts from the response's ``AIMessage.usage_metadata`` (or
 ``response_metadata``) and convert to the unit your Cycles budgets use.
 
-If the callable raises, the gate logs a warning and falls back to the
-configured ``estimate`` so a costing bug never erases a successful model
-result. Use the provided ``langchain_runcycles.extractors`` factories for
-OpenAI / Anthropic shapes, or write your own."""
+If the callable raises or returns a non-``Amount``, the gate logs a warning
+and falls back to the configured ``estimate`` so a costing bug never erases a
+successful model result. Use the provided ``langchain_runcycles.extractors``
+factories for OpenAI / Anthropic shapes, or write your own."""

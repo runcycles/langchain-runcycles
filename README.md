@@ -223,7 +223,7 @@ gate = CyclesModelGate(
 
 Both factories read `AIMessage.usage_metadata` (LangChain's normalized usage shape, populated by `langchain-openai` and `langchain-anthropic`) and return an `Amount` in `USD_MICROCENTS`. Pricing arguments are keyword-only so they can't be swapped accidentally.
 
-You can also pass a custom `cost_fn: Callable[[ModelResponse], Amount]` — the middleware just calls it after the wrapped handler returns and uses the result for the commit. **If your callable raises, the gate logs a warning and falls back to `estimate`** — a costing bug never erases the model result.
+You can also pass a custom `cost_fn: Callable[[ModelResponse], Amount]` — the middleware calls it after the wrapped handler returns and uses the returned `Amount` for the commit. **If your callable raises or returns a non-`Amount`, the gate logs a warning and falls back to `estimate`** — a costing bug never erases the model result.
 
 ### Denial messages
 

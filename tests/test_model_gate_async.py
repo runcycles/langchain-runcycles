@@ -271,6 +271,37 @@ async def test_async_cost_fn_exception_falls_back_to_estimate(
 
 
 @pytest.mark.asyncio
+async def test_async_cost_fn_invalid_return_falls_back_to_estimate(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """async parity: invalid cost_fn return values fall back to estimate."""
+    from runcycles import Amount, Unit
+
+    def broken_cost(_result: Any) -> Any:
+        return None
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    captured: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured)
+
+    gate = CyclesModelGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=broken_cost,
+    )
+    handler_result = ModelResponse(result=[AIMessage(content="model output")])
+    handler = MagicMock(return_value=handler_result)
+
+    result = await gate.awrap_model_call(model_request, handler)
+    assert result is handler_result
+
+    assert captured["request"].actual.amount == 42
+
+
+@pytest.mark.asyncio
 async def test_async_cost_fn_used_in_decide_reserve_mode(
     async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
 ) -> None:

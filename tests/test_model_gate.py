@@ -376,6 +376,35 @@ def test_cost_fn_exception_falls_back_to_estimate(
     assert commit_request.actual.amount == 42  # fell back to estimate
 
 
+def test_cost_fn_invalid_return_falls_back_to_estimate(
+    sync_client: CyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """A cost_fn returning the wrong type is a costing bug, not a model-call failure."""
+    from runcycles import Amount, Unit
+
+    def broken_cost(_result: Any) -> Any:
+        return None
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=broken_cost,
+    )
+    handler_result = ModelResponse(result=[AIMessage(content="model output")])
+    handler = MagicMock(return_value=handler_result)
+
+    result = gate.wrap_model_call(model_request, handler)
+    assert result is handler_result
+
+    commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
+    commit_request = commit_args[1]
+    assert commit_request.actual.amount == 42
+
+
 def test_cost_fn_not_called_in_decide_mode(
     sync_client: CyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
 ) -> None:

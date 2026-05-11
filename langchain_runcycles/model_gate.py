@@ -15,8 +15,9 @@ Wraps every model invocation with a Cycles authorization check. Three modes
 v0.2.0+ supports per-call actual-cost extraction via the optional ``cost_fn``
 parameter: if supplied, the callable receives the ``ModelResponse`` returned
 by the wrapped handler and returns an ``Amount`` used for the commit. If the
-callable raises, the gate logs a warning and falls back to the configured
-``estimate`` so a costing bug never erases a successful model result.
+callable raises or returns a non-``Amount``, the gate logs a warning and falls
+back to the configured ``estimate`` so a costing bug never erases a successful
+model result.
 Without ``cost_fn`` the gate commits at the configured ``estimate`` (the
 v0.1.x default behavior). ``langchain_runcycles.extractors`` ships
 ``openai_cost`` and ``anthropic_cost`` factories that produce a ``cost_fn``
@@ -118,19 +119,26 @@ class CyclesModelGate(AgentMiddleware):
         """Resolve the commit ``actual`` from cost_fn or fall back to estimate.
 
         If ``cost_fn`` is unset, return the configured estimate (v0.1.x parity).
-        If it's set and succeeds, return its result. If it raises, log a warning
-        and fall back to the estimate — preserves the model result even when
-        per-call costing breaks for some reason."""
+        If it's set and returns a valid Amount, return its result. If it raises
+        or returns an invalid value, log a warning and fall back to the estimate
+        so a costing bug does not erase the model result."""
         if self._cost_fn is None:
             return self._estimate
         try:
-            return self._cost_fn(result)
+            actual = self._cost_fn(result)
         except Exception:
             logger.warning(
                 "cost_fn raised while computing commit amount; falling back to configured estimate",
                 exc_info=True,
             )
             return self._estimate
+        if not isinstance(actual, Amount):
+            logger.warning(
+                "cost_fn returned %s instead of Amount; falling back to configured estimate",
+                type(actual).__name__,
+            )
+            return self._estimate
+        return actual
 
     def _resolve_namespace(self, ctx: Any) -> str | None:
         """Resolve the optional namespace for this call. Returns None if disabled."""

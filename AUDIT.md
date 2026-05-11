@@ -18,7 +18,7 @@
 | SDK methods consumed | 5/5 | 0 |
 | Idempotency-key generation | — | 0 |
 | Reservation lifecycle (reserve → commit/release) | — | 0 |
-| Test coverage gate | ≥95% | 0 (99.58%) |
+| Test coverage gate | ≥95% | 0 (140 tests, 99.19%) |
 
 **Overall: middleware contract is in conformance with the LangChain 1.x API as documented at <https://docs.langchain.com/oss/python/langchain/middleware/custom>.**
 
@@ -119,7 +119,7 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 
 ## Test coverage
 
-- 136 tests across:
+- 140 tests across:
   - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log, idempotency-key determinism, and v0.1.3 namespace static/callable/no-namespace/cross-run-collision)
   - `tests/test_model_gate.py`, `tests/test_model_gate_async.py` — sync + async model-gate paths (v0.1.5+); decide allow/deny, reserve lifecycle, settlement raise/log, namespace, **plus v0.2.0+ `cost_fn` (applied / None-fallback / exception-fallback / decide-mode-skip)**
   - `tests/test_extractors.py` — `openai_cost` / `anthropic_cost` factories (v0.2.0+); computation, zero-token edge, missing-`usage_metadata` raise, empty-`result` raise, fractional-cent rounding, keyword-only-pricing guard
@@ -138,7 +138,7 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 | Path | Source | Behavior |
 |---|---|---|
 | `_resolve_actual(result)` | `model_gate.py:114` | Returns `estimate` if `cost_fn is None`; calls `cost_fn(result)` otherwise. |
-| `cost_fn` raises | same | Logs warning at `langchain_runcycles.model_gate`; returns `estimate` so the model result is preserved. |
+| `cost_fn` raises or returns a non-`Amount` | same | Logs warning at `langchain_runcycles.model_gate`; returns `estimate` so the model result is preserved. |
 | Sync commit path | `model_gate.py:189` | Uses `actual = self._resolve_actual(result)` for `CommitRequest.actual`. |
 | Async commit path | `model_gate.py:283` | Same. |
 
@@ -146,7 +146,7 @@ Built-in extractor factories in `langchain_runcycles/extractors.py` (both keywor
 - `openai_cost(prompt_per_million_usd, completion_per_million_usd)`
 - `anthropic_cost(input_per_million_usd, output_per_million_usd)`
 
-Both read `AIMessage.usage_metadata` (LangChain's normalized usage shape) from `result.result[0]` and convert to `Unit.USD_MICROCENTS`. Missing/non-dict `usage_metadata`, empty `result.result`, and unrecognized shapes all raise `ValueError`, which the gate's exception-fallback path catches and converts to a commit at `estimate`.
+Both read `AIMessage.usage_metadata` (LangChain's normalized usage shape) from `result.result[0]` and convert to `Unit.USD_MICROCENTS`. Missing/non-dict `usage_metadata`, missing token fields, negative token counts, empty `result.result`, and unrecognized shapes all raise `ValueError`, which the gate's exception-fallback path catches and converts to a commit at `estimate`.
 
 Locked down by `tests/test_model_gate.py::test_cost_fn_used_for_commit_actual`, `::test_cost_fn_none_commits_at_estimate`, `::test_cost_fn_exception_falls_back_to_estimate`, `::test_cost_fn_not_called_in_decide_mode`, plus async siblings and the full `tests/test_extractors.py` (6 tests covering computation, edge cases, fallback paths, fractional-cent rounding, and the keyword-only-pricing guard).
 

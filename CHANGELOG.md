@@ -19,11 +19,11 @@ Per-call actual-cost extraction for `CyclesModelGate` — closes the v0.1.x "com
 
 ### Resilience
 
-- **`cost_fn` exceptions never erase the model result.** If `cost_fn(result)` raises, `CyclesModelGate` logs a warning and falls back to the configured `estimate` for the commit. The model result is still returned to the agent. This means a stale or wrong extractor downgrades the debit accuracy (estimate vs. actual) but never breaks the agent loop. Locked down by `tests/test_model_gate.py::test_cost_fn_exception_falls_back_to_estimate` and the async sibling.
+- **`cost_fn` errors never erase the model result.** If `cost_fn(result)` raises or returns a non-`Amount`, `CyclesModelGate` logs a warning and falls back to the configured `estimate` for the commit. The model result is still returned to the agent. This means a stale or wrong extractor downgrades the debit accuracy (estimate vs. actual) but never breaks the agent loop. Locked down by `tests/test_model_gate.py::test_cost_fn_exception_falls_back_to_estimate`, `::test_cost_fn_invalid_return_falls_back_to_estimate`, and the async siblings.
 
 ### Coverage
 
-136 tests, 99.58% coverage (gate `fail_under = 95`); `model_gate.py` at 100%. Four new sync cost_fn tests (applied / None-fallback / exception-fallback / decide+reserve parity / not-called-in-decide-mode) + four async parity tests + missing-reservation-id async coverage + awaitable-handler reserve-mode coverage on `CyclesModelGate`; seven tests on the extractors module covering OpenAI/Anthropic shape extraction, zero-token edge cases, missing-usage-metadata fallback, empty-result fallback, fractional-cent rounding, and the keyword-only pricing-arg guard.
+140 tests, 99.19% coverage (gate `fail_under = 95`); `model_gate.py` at 100%. Cost-fn coverage now includes applied / None-fallback / exception-fallback / invalid-return fallback / decide+reserve parity / not-called-in-decide-mode across sync and async paths, plus missing-reservation-id async coverage and awaitable-handler reserve-mode coverage on `CyclesModelGate`. Extractor tests cover OpenAI/Anthropic shape extraction, zero-token edge cases, missing-usage-metadata fallback, missing token fields, negative token counts, empty-result fallback, fractional-cent rounding, and the keyword-only pricing-arg guard.
 
 ### Behavior change
 
