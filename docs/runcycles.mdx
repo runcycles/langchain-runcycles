@@ -37,6 +37,8 @@ if "CYCLES_API_KEY" not in os.environ:
     os.environ["CYCLES_API_KEY"] = getpass.getpass("Enter your Cycles API key: ")
 if "CYCLES_BASE_URL" not in os.environ:
     os.environ["CYCLES_BASE_URL"] = "http://localhost:7878"
+if "ANTHROPIC_API_KEY" not in os.environ:
+    os.environ["ANTHROPIC_API_KEY"] = getpass.getpass("Enter your Anthropic API key: ")
 ```
 
 It's also helpful (but not required) to set up LangSmith for observability and <Tooltip tip="Log each step of a model's execution to debug and improve it">tracing</Tooltip>. To enable automated tracing, set your [LangSmith](/langsmith/home) API key:
@@ -48,14 +50,14 @@ os.environ["LANGSMITH_TRACING"] = "true"
 
 ### Installation
 
-The Cycles middleware lives in the `langchain-runcycles` package:
+The Cycles middleware lives in the `langchain-runcycles` package. The examples below use Claude, so install `langchain-anthropic` too:
 
 <CodeGroup>
     ```bash pip
-    pip install -U langchain-runcycles
+    pip install -U langchain-runcycles langchain-anthropic
     ```
     ```bash uv
-    uv add langchain-runcycles
+    uv add langchain-runcycles langchain-anthropic
     ```
 </CodeGroup>
 
@@ -345,7 +347,7 @@ model_gate = CyclesModelGate(
     `"raise"` surfaces the commit failure to the agent, which may retry. If the handler's side effect (an email send, a payment, a CRM write, or a paid model call) is **not safely idempotent on retry**, choose `"log"` instead. Duplicate side effects are usually worse than a one-off accounting miss.
 </Tip>
 
-The release path (on tool-side exception) always logs and continues so the original tool exception wins; `settlement_error_policy` applies only to the success-path commit.
+The release path (after a model or tool handler exception) always logs and continues so the original handler exception wins; `settlement_error_policy` applies only to the success-path commit.
 
 ### Idempotency keys: deterministic per `tool_call_id`, optionally namespaced
 
