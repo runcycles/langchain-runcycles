@@ -69,6 +69,7 @@ def _coerce_id(value: Any) -> str:
         return coerce_tool_call_id(value)
     return coerce_tool_call_id(None)
 
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable
 
@@ -116,7 +117,13 @@ class CyclesToolGate(AgentMiddleware):
         self._cost_fn = cost_fn
 
     def _resolve_actual(self, request: Any, result: Any) -> Amount:
-        """Resolve the commit ``actual`` from cost_fn or fall back to estimate."""
+        """Resolve the commit ``actual`` from cost_fn or fall back to estimate.
+
+        If ``cost_fn`` is unset, return the configured estimate (v0.2.x parity).
+        If it's set and returns a valid Amount, return its result. If it raises
+        or returns an invalid value, log a warning and fall back to the estimate
+        so a costing bug does not erase the tool result.
+        """
         if self._cost_fn is None:
             return self._estimate
         try:

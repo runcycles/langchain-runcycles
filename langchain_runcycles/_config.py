@@ -64,8 +64,10 @@ factories for OpenAI / Anthropic shapes, or write your own."""
 ToolCostFn: TypeAlias = Callable[[Any, Any], Amount]
 """(tool_call_request, tool_result) -> Amount.
 
-Per-call cost extractor for ``CyclesToolGate`` (v0.3.0+). The first argument
-is the LangChain ``ToolCallRequest`` so extractors can inspect the tool name,
+Per-call cost extractor for ``CyclesToolGate`` (v0.3.0+). The alias uses
+``Any`` for both arguments so the public config surface does not depend on
+LangGraph's runtime request class. At runtime, the first argument is the
+LangChain ``ToolCallRequest`` so extractors can inspect the tool name,
 arguments, call id, and state. The second argument is the wrapped handler's
 result, usually a ``ToolMessage`` but possibly any value returned by the
 runtime or tests.
