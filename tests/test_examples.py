@@ -19,6 +19,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 EXAMPLES_DIR = pathlib.Path(__file__).resolve().parent.parent / "examples"
 
@@ -33,10 +34,39 @@ def _load_example(name: str) -> ModuleType:
     return module
 
 
-@pytest.mark.parametrize("name", ["tenant_budget_agent", "multi_agent_fanout"])
+@pytest.mark.parametrize("name", ["tenant_budget_agent", "tool_cost_fn", "multi_agent_fanout"])
 def test_example_module_imports(name: str) -> None:
     module = _load_example(name)
     assert hasattr(module, "main"), f"{name} missing main()"
+
+
+def test_tool_cost_fn_reads_json_serialized_tool_message_content() -> None:
+    module = _load_example("tool_cost_fn")
+    request = _ToolCostRequest("lookup_customer")
+    result = ToolMessage(
+        content='{"email": "alice@example.com", "charged_microcents": 12345}',
+        tool_call_id="tc_lookup",
+    )
+
+    amount = module.tool_cost(request, result)
+    assert amount.amount == 12_345
+
+
+def test_tool_cost_fn_falls_back_when_result_content_is_not_structured() -> None:
+    module = _load_example("tool_cost_fn")
+    request = _ToolCostRequest("lookup_customer")
+    result = ToolMessage(content="not json", tool_call_id="tc_lookup")
+
+    amount = module.tool_cost(request, result)
+    assert amount.amount == 12_500
+
+
+def test_tool_cost_fn_prices_sms_segments_from_request_args() -> None:
+    module = _load_example("tool_cost_fn")
+    request = _ToolCostRequest("send_sms", {"body": "x" * 161})
+
+    amount = module.tool_cost(request, "Sent")
+    assert amount.amount == 150_000
 
 
 def test_multi_agent_demo_preserves_tenant_state_and_gate_order(
@@ -69,3 +99,8 @@ def test_multi_agent_demo_preserves_tenant_state_and_gate_order(
     ]
     model_gate = captured["middleware"][1]
     assert model_gate._mode == "decide+reserve"  # noqa: SLF001
+
+
+class _ToolCostRequest:
+    def __init__(self, name: str, args: dict[str, Any] | None = None) -> None:
+        self.tool_call = {"name": name, "args": args or {}, "id": "tc_1"}

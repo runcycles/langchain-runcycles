@@ -13,6 +13,12 @@ Wraps every tool call with a Cycles authorization check. Three modes:
 Subject and action are resolved per call from constructor config (static value,
 name-to-Action mapping, or callable). Denial returns a ``ToolMessage`` so the
 model can recover gracefully; the underlying tool handler is never invoked.
+
+v0.3.0+ supports per-call actual-cost extraction via optional ``cost_fn``:
+if supplied, the callable receives ``(ToolCallRequest, result)`` and returns
+an ``Amount`` used for the commit. If it raises or returns a non-``Amount``,
+the gate logs a warning and falls back to the configured ``estimate`` so the
+tool result is preserved.
 """
 
 from __future__ import annotations
@@ -32,7 +38,13 @@ from runcycles import (
     ReservationCreateRequest,
 )
 
-from langchain_runcycles._config import ActionConfig, DenialFormatter, IdempotencyNamespace, SubjectConfig
+from langchain_runcycles._config import (
+    ActionConfig,
+    DenialFormatter,
+    IdempotencyNamespace,
+    SubjectConfig,
+    ToolCostFn,
+)
 from langchain_runcycles._internal import (
     _DEFAULT_ESTIMATE,
     coerce_tool_call_id,
@@ -83,6 +95,7 @@ class CyclesToolGate(AgentMiddleware):
         denial_message: DenialFormatter = "Tool call denied by Cycles policy: {reason}",
         settlement_error_policy: SettlementErrorPolicy = "raise",
         idempotency_namespace: IdempotencyNamespace | None = None,
+        cost_fn: ToolCostFn | None = None,
     ) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(f"Invalid mode {mode!r}; expected one of {_VALID_MODES}.")
@@ -100,6 +113,27 @@ class CyclesToolGate(AgentMiddleware):
         self._denial_message = denial_message
         self._settlement_error_policy: SettlementErrorPolicy = settlement_error_policy
         self._idempotency_namespace = idempotency_namespace
+        self._cost_fn = cost_fn
+
+    def _resolve_actual(self, request: Any, result: Any) -> Amount:
+        """Resolve the commit ``actual`` from cost_fn or fall back to estimate."""
+        if self._cost_fn is None:
+            return self._estimate
+        try:
+            actual = self._cost_fn(request, result)
+        except Exception:
+            logger.warning(
+                "tool cost_fn raised while computing commit amount; falling back to configured estimate",
+                exc_info=True,
+            )
+            return self._estimate
+        if not isinstance(actual, Amount):
+            logger.warning(
+                "tool cost_fn returned %s instead of Amount; falling back to configured estimate",
+                type(actual).__name__,
+            )
+            return self._estimate
+        return actual
 
     def _resolve_namespace(self, ctx: Any) -> str | None:
         """Resolve the optional namespace for this call. Returns None if disabled."""
@@ -186,12 +220,13 @@ class CyclesToolGate(AgentMiddleware):
             self._safe_release_sync(reservation_id, idem)
             raise
 
+        actual = self._resolve_actual(request, result)
         try:
             commit_resp = self._client.commit_reservation(
                 reservation_id,
                 CommitRequest(
                     idempotency_key=f"commit-{idem}",
-                    actual=self._estimate,
+                    actual=actual,
                 ),
             )
         except Exception:
@@ -320,12 +355,13 @@ class CyclesToolGate(AgentMiddleware):
             await self._safe_release_async(reservation_id, idem)
             raise
 
+        actual = self._resolve_actual(request, result)
         try:
             commit_resp = await self._client.commit_reservation(
                 reservation_id,
                 CommitRequest(
                     idempotency_key=f"commit-{idem}",
-                    actual=self._estimate,
+                    actual=actual,
                 ),
             )
         except Exception:

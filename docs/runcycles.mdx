@@ -19,7 +19,8 @@ This guide provides a quick overview for getting started with the [Cycles](https
 
 - <Icon icon="cpu" size={16}/> Pre-model-call authorization via `wrap_model_call`: gate every LLM turn before spend, returning an `AIMessage` denial so the agent terminates naturally (v0.1.5+).
 - <Icon icon="shield-lock" size={16}/> Pre-tool-call authorization via `wrap_tool_call`: denied calls return a `ToolMessage` so the model can recover gracefully.
-- <Icon icon="wallet" size={16}/> Per-tenant budget enforcement: reserve before tool use, commit on success, release on exception.
+- <Icon icon="wallet" size={16}/> Per-tenant budget enforcement: reserve before model or tool use, commit on success, release on exception.
+- <Icon icon="calculator" size={16}/> Per-call actual-cost extraction: `CyclesModelGate.cost_fn` reads model responses, and `CyclesToolGate.cost_fn` reads `(request, result)` for provider-specific tool pricing.
 - <Icon icon="repeat" size={16}/> Fan-out caps via `before_model` with `jump_to: "end"`: stop runaway agents before another model turn.
 - <Icon icon="bolt" size={16}/> Sync and async support: pair with `agent.invoke()` or `agent.ainvoke()`.
 
@@ -208,8 +209,8 @@ This order (fan-out first, then model, then tool) means runaway loops halt befor
 | Mode | Behavior |
 | :--- | :--- |
 | `"decide"` | Calls `client.decide()`. Denies the tool call on a non-allow decision. No reservation. |
-| `"reserve"` | Creates a reservation, runs the tool, commits on success (at the configured `estimate`), releases on exception. |
-| `"decide+reserve"` | Authorizes via `decide()` first, then reserves and commits at the configured `estimate`. Most strict. |
+| `"reserve"` | Creates a reservation, runs the tool, commits on success, releases on exception. Commit amount is `cost_fn(request, result)` when supplied, otherwise `estimate`. |
+| `"decide+reserve"` | Authorizes via `decide()` first, then reserves and commits. Most strict; commit amount follows the same `cost_fn` / `estimate` rule. |
 
 Denied calls return a `ToolMessage` containing the denial reason: the underlying tool handler is never invoked, but the model sees the denial like any other tool result and can choose another path.
 
@@ -228,6 +229,56 @@ gate = CyclesToolGate(
     denial_message="Cycles denied {tool} for tenant: {reason}",
 )
 ```
+
+Use `cost_fn` when the tool result or request carries a measured provider cost. The callable receives the original LangChain tool-call request and the wrapped handler result, then returns an `Amount`:
+
+```python Tool cost_fn icon="calculator"
+import json
+from typing import Any
+
+from langchain_runcycles import CyclesToolGate
+from runcycles import Action, Amount, Subject, Unit
+
+def tool_content(result: Any) -> Any:
+    content = getattr(result, "content", result)
+    if isinstance(content, str):
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return content
+    return content
+
+def tool_cost(request: Any, result: Any) -> Amount:
+    tool_name = request.tool_call["name"]
+    if tool_name == "send_sms":
+        body = request.tool_call.get("args", {}).get("body", "")
+        segments = max(1, (len(body) + 159) // 160)
+        return Amount(unit=Unit.USD_MICROCENTS, amount=segments * 75_000)
+
+    if tool_name == "lookup_customer":
+        content = tool_content(result)
+        if isinstance(content, dict) and isinstance(content.get("charged_microcents"), int):
+            return Amount(unit=Unit.USD_MICROCENTS, amount=content["charged_microcents"])
+        return Amount(unit=Unit.USD_MICROCENTS, amount=10_000)
+
+    return Amount(unit=Unit.USD_MICROCENTS, amount=0)
+
+gate = CyclesToolGate(
+    client,
+    subject=Subject(tenant="acme", agent="researcher"),
+    action={
+        "send_sms": Action(kind="tool.call", name="send_sms"),
+        "lookup_customer": Action(kind="tool.call", name="lookup_customer"),
+    },
+    mode="reserve",
+    estimate=Amount(unit=Unit.USD_MICROCENTS, amount=500_000),
+    cost_fn=tool_cost,
+)
+```
+
+LangGraph serializes arbitrary dict tool returns into `ToolMessage.content` as JSON strings, so parse string content before reading provider-specific metadata.
+
+If `cost_fn` raises or returns a non-`Amount`, `CyclesToolGate` logs a warning and falls back to `estimate`. The tool result is still returned to the agent. There are no built-in tool extractors because tool result shapes and provider pricing vary widely.
 
 `action` accepts a static `Action`, a per-tool mapping (`Mapping[str, Action]`), or a callable `(request) -> Action` (single argument — receives the LangChain tool-call request). `subject` accepts a static `Subject` or a callable `(request, state) -> Subject` (two arguments — receives the request *and* the agent state, so the tenant can be resolved from per-call state). Per-tool mappings aren't supported on `subject` — the constructor rejects them.
 
@@ -300,13 +351,13 @@ await agent.ainvoke({"messages": [{"role": "user", "content": "Email alice@examp
 
 A few behaviors worth knowing before pointing the middleware at production traffic.
 
-### `CyclesToolGate` reserve mode commits at `estimate`
-
-`CyclesToolGate` in `"reserve"` and `"decide+reserve"` modes reserves the configured `estimate`, runs the tool, then commits *that same amount* on success, not the tool's actual measured cost. A `cost_fn` parameter analogous to `CyclesModelGate.cost_fn` (v0.2.0+) is on the roadmap for the tool gate; until then, set `estimate` to the worst-case spend per call you're willing to debit, or use `mode="decide"` if you only want policy gating without budget movement.
-
 ### `CyclesModelGate` actual-cost extraction (v0.2.0+)
 
 `CyclesModelGate` accepts a `cost_fn: Callable[[ModelResponse], Amount]` that reads token usage off the wrapped response and computes the actual debit. `langchain_runcycles.extractors` ships `openai_cost` and `anthropic_cost` factories; both take per-million-token pricing as keyword args and read `AIMessage.usage_metadata` (LangChain's normalized usage shape). Custom extractors are supported — the middleware calls `cost_fn(result)` and uses the returned `Amount` for the commit. If the callable raises or returns a non-`Amount`, the gate logs a warning and falls back to `estimate` so a costing bug never erases the model result.
+
+### `CyclesToolGate` actual-cost extraction (v0.3.0+)
+
+`CyclesToolGate` accepts a `cost_fn: Callable[[ToolCallRequest, Any], Amount]`. The middleware calls `cost_fn(request, result)` after the wrapped tool handler returns and uses the returned `Amount` for the commit. When unset, behavior is backward-compatible: commits use the configured `estimate`. If the callable raises or returns a non-`Amount`, the gate logs a warning and falls back to `estimate` so a costing bug never erases the tool result. Tool extractors are intentionally user-supplied because tool providers do not expose one shared cost metadata shape.
 
 ### Settlement-failure policy
 
@@ -391,11 +442,11 @@ gate = CyclesToolGate(
 
 ### Scope and roadmap
 
-Implemented (v0.2.0+): `wrap_model_call` (`CyclesModelGate`), `wrap_tool_call` (`CyclesToolGate`), and `before_model` (`CyclesFanOutGate`): all three hooks of the LangChain agent governance triad. `CyclesModelGate` and `CyclesToolGate` share the same three modes (`decide` / `reserve` / `decide+reserve`), reservation lifecycle, and `settlement_error_policy`. `CyclesModelGate` additionally supports per-call actual-cost extraction via `cost_fn` (v0.2.0+). `CyclesFanOutGate` is a thinner halt-only middleware: it consults `decide()` per turn and counts turns against `max_turns`, but does not reserve, so it shares only the `idempotency_namespace` plumbing with the other two.
+Implemented (v0.3.0+): `wrap_model_call` (`CyclesModelGate`), `wrap_tool_call` (`CyclesToolGate`), and `before_model` (`CyclesFanOutGate`): all three hooks of the LangChain agent governance triad. `CyclesModelGate` and `CyclesToolGate` share the same three modes (`decide` / `reserve` / `decide+reserve`), reservation lifecycle, `settlement_error_policy`, and per-call actual-cost extraction via `cost_fn`. `CyclesFanOutGate` is a thinner halt-only middleware: it consults `decide()` per turn and counts turns against `max_turns`, but does not reserve, so it shares only the `idempotency_namespace` plumbing with the other two.
 
 Streaming verified in v0.2.1 — see the Async support section above. `agent.astream(...)` and `agent.astream_events(...)` work without code changes because LangChain aggregates per-chunk responses inside `BaseChatModel.ainvoke`, below the middleware layer.
 
-The multi-agent demo agent shipped in v0.2.2 — see [`examples/multi_agent_fanout.py`](https://github.com/runcycles/langchain-runcycles/blob/main/examples/multi_agent_fanout.py) and the companion [pattern walkthrough](https://github.com/runcycles/langchain-runcycles/blob/main/examples/multi_agent_fanout_writeup.md). For per-tool token-cost capture today on `CyclesToolGate` (no `cost_fn` yet on the tool gate), use the `BaseCallbackHandler` callback handler from `cycles-client-python` alongside the middleware — the two compose cleanly.
+The multi-agent demo agent shipped in v0.2.2 — see [`examples/multi_agent_fanout.py`](https://github.com/runcycles/langchain-runcycles/blob/main/examples/multi_agent_fanout.py) and the companion [pattern walkthrough](https://github.com/runcycles/langchain-runcycles/blob/main/examples/multi_agent_fanout_writeup.md). For a focused tool-side actual-cost example, see [`examples/tool_cost_fn.py`](https://github.com/runcycles/langchain-runcycles/blob/main/examples/tool_cost_fn.py).
 
 ## API reference
 

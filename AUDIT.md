@@ -112,7 +112,7 @@ Locked down by `tests/test_tool_gate.py::test_idempotency_keys_are_deterministic
 
 1. Pre-call: `create_reservation` → if not success or no `reservation_id`, return denial — `ToolMessage` for `CyclesToolGate`, `ModelResponse(result=[AIMessage(...)])` for `CyclesModelGate`.
 2. Run handler (the wrapped tool call or model call).
-3. Success: `commit_reservation`. For `CyclesModelGate` (v0.2.0+), commits at `cost_fn(result)` if `cost_fn` is supplied (with fallback to `estimate` on extractor error); otherwise commits at `estimate`. For `CyclesToolGate`, always commits at `estimate` (a tool-side `cost_fn` analog is roadmap, not yet shipped).
+3. Success: `commit_reservation`. For `CyclesModelGate` (v0.2.0+), commits at `cost_fn(result)` if `cost_fn` is supplied (with fallback to `estimate` on extractor error); otherwise commits at `estimate`. For `CyclesToolGate` (v0.3.0+), commits at `cost_fn(request, result)` if `cost_fn` is supplied (with fallback to `estimate` on extractor error); otherwise commits at `estimate`.
 4. Exception: `release_reservation`, then re-raise.
 
 **Settlement-failure handling** (v0.1.2+ for tool gate, v0.1.5+ for model gate; broadened in v0.2.3+): commit failures fall into two cases:
@@ -129,20 +129,22 @@ Both cases now honor `settlement_error_policy` on `CyclesToolGate` and `CyclesMo
 
 ## Test coverage
 
-- 159 tests across:
-  - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log, idempotency-key determinism, and v0.1.3 namespace static/callable/no-namespace/cross-run-collision)
+- 174 tests across:
+  - `tests/test_tool_gate.py`, `tests/test_tool_gate_async.py` — sync + async tool-gate paths (including settlement_error_policy raise/log, idempotency-key determinism, v0.1.3 namespace static/callable/no-namespace/cross-run-collision, **plus v0.3.0+ `cost_fn` (applied / None-fallback / exception-fallback / invalid-return fallback / decide+reserve parity / decide-mode-skip)**)
   - `tests/test_model_gate.py`, `tests/test_model_gate_async.py` — sync + async model-gate paths (v0.1.5+); decide allow/deny, reserve lifecycle, settlement raise/log, namespace, **plus v0.2.0+ `cost_fn` (applied / None-fallback / exception-fallback / decide-mode-skip)**
   - `tests/test_extractors.py` — `openai_cost` / `anthropic_cost` factories (v0.2.0+); computation, zero-token edge, missing-`usage_metadata` raise, missing token fields raise, negative tokens raise, non-coercible token values raise, empty-`result` raise, fractional-cent rounding, keyword-only-pricing guard
   - `tests/test_model_gate_streaming.py` — streaming-contract verification (v0.2.1+); cost_fn-called-once-per-turn, aggregated-usage-metadata extraction, cancellation-releases-reservation
   - `tests/test_fanout.py`, `tests/test_fanout_async.py` — sync + async fan-out paths (including state-derived idempotency namespace)
-  - `tests/test_examples.py` — import smoke for bundled examples
+  - `tests/test_examples.py` — import smoke for bundled examples, plus `tool_cost_fn.py` JSON-serialized `ToolMessage.content` and request-argument pricing checks
   - `tests/integration/test_live_agent.py` — `create_agent` construction with our middleware against a `FakeMessagesListChatModel`, verifying the AgentMiddleware contract is satisfied at runtime
-- Coverage ≥99% (gate `fail_under = 95` per `pyproject.toml`).
+- Coverage 99.63% (gate `fail_under = 95` per `pyproject.toml`).
 - Both sync (`.invoke()`) and async (`.ainvoke()`) paths exercised.
 - Mocking is done at the SDK boundary (`CyclesClient.decide`, etc.) so tests are independent of HTTP transport.
-- Idempotency-key determinism (`<prefix>-<tool_call_id>`, no random suffix) and reserve-mode commit amount (`actual=estimate`) are explicitly asserted to prevent silent contract drift.
+- Idempotency-key determinism (`<prefix>-<tool_call_id>`, no random suffix) and reserve-mode default commit amount (`actual=estimate` when no `cost_fn` is supplied) are explicitly asserted to prevent silent contract drift.
 
-## Per-call cost extraction (v0.2.0+)
+## Per-call cost extraction (v0.2.0+ / v0.3.0+)
+
+### Model gate (v0.2.0+)
 
 `CyclesModelGate` accepts an optional `cost_fn: Callable[[ModelResponse], Amount]`. When set, the gate calls `cost_fn(result)` after the wrapped handler returns and uses the returned `Amount` for `commit_reservation.actual` instead of the configured `estimate`. When unset, behavior is identical to v0.1.x (commit-at-estimate).
 
@@ -161,9 +163,23 @@ Both read `AIMessage.usage_metadata` (LangChain's normalized usage shape) from `
 
 Locked down by `tests/test_model_gate.py::test_cost_fn_used_for_commit_actual`, `::test_cost_fn_none_commits_at_estimate`, `::test_cost_fn_exception_falls_back_to_estimate`, `::test_cost_fn_not_called_in_decide_mode`, plus async siblings and the full `tests/test_extractors.py` (6 tests covering computation, edge cases, fallback paths, fractional-cent rounding, and the keyword-only-pricing guard).
 
+### Tool gate (v0.3.0+)
+
+`CyclesToolGate` accepts an optional `cost_fn: Callable[[ToolCallRequest, Any], Amount]`. When set, the gate calls `cost_fn(request, result)` after the wrapped tool handler returns and uses the returned `Amount` for `commit_reservation.actual` instead of the configured `estimate`. The request argument exposes `tool_call.name`, args, id, and state so a single extractor can route across multiple tools. When unset, behavior is identical to v0.2.x (commit-at-estimate).
+
+| Path | Source | Behavior |
+|---|---|---|
+| `_resolve_actual(request, result)` | `tool_gate.py` | Returns `estimate` if `cost_fn is None`; calls `cost_fn(request, result)` otherwise. |
+| `cost_fn` raises or returns a non-`Amount` | same | Logs warning at `langchain_runcycles.tool_gate`; returns `estimate` so the tool result is preserved. |
+| Sync commit path | `tool_gate.py` | Uses `actual = self._resolve_actual(request, result)` for `CommitRequest.actual`. |
+| Async commit path | `tool_gate.py` | Same. |
+
+No built-in tool extractor factories are provided. Unlike model token usage, tool providers do not expose one normalized cost metadata shape; users should provide a router-style function keyed by `request.tool_call["name"]` or by provider-specific result metadata.
+
+Locked down by `tests/test_tool_gate.py::test_tool_cost_fn_used_for_commit_actual_and_receives_request_result`, `::test_without_cost_fn_commit_called_with_configured_estimate`, `::test_tool_cost_fn_exception_falls_back_to_estimate`, `::test_tool_cost_fn_invalid_return_falls_back_to_estimate`, `::test_tool_cost_fn_not_called_in_decide_mode`, `::test_tool_cost_fn_used_in_decide_reserve_mode`, plus async siblings.
+
 ## Known limitations
 
-- **`CyclesToolGate` reserve mode commits at estimate**, not at actual usage. A `cost_fn` analogous to `CyclesModelGate.cost_fn` is the natural extension — not yet shipped. Locked down by `tests/test_tool_gate.py::test_commit_called_with_configured_estimate`.
 - **Streaming verification shipped in v0.2.1.** See "Streaming contract" section below — the audit + tests in `tests/test_model_gate_streaming.py` close this item.
 - **Single tenant per middleware instance** unless you supply a `SubjectExtractor` callable. Per-call subject resolution is fully supported via the callable form; only the static-Subject convenience is single-tenant.
 - **Synthetic `tool_call_id` when missing.** A `ToolCallRequest` with no `id` field has its denial `ToolMessage` correlated via a fabricated `missing-<12-hex>` id, with a warning logged at `langchain_runcycles._internal`. Because the synthesis is fresh per call, the resulting idempotency key on this fallback path is *not* retry-stable. Conformant LangChain runtimes always supply `id`. Locked down by `tests/test_tool_gate.py::test_synthetic_tool_call_id_when_missing`.

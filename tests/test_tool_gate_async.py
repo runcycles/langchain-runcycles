@@ -231,6 +231,203 @@ async def test_async_idempotency_namespace_callable(
     assert captured["decide"] == "decide-derived-send_email-tc_1"
 
 
+# --- tool cost_fn (v0.3.0+) ----------------------------------------------------------
+
+
+def _capture_commit_actual(async_client: AsyncCyclesClient, captured: dict[str, Any]) -> None:
+    """Replace async_client.commit_reservation with a wrapper that records the CommitRequest."""
+    from tests.conftest import commit_ok
+
+    async def _commit(_rid: Any, request: Any) -> CyclesResponse:
+        captured["request"] = request
+        return commit_ok()
+
+    async_client.commit_reservation = _commit
+
+
+@pytest.mark.asyncio
+async def test_async_tool_cost_fn_used_for_commit_actual_and_receives_request_result(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+) -> None:
+    """async parity: commit actual comes from cost_fn(request, result)."""
+    from runcycles import Amount, Unit
+
+    actual_from_cost_fn = Amount(unit=Unit.USD_MICROCENTS, amount=12_345)
+    captured_calls: list[tuple[Any, Any]] = []
+
+    def cost(request: Any, result: Any) -> Amount:
+        captured_calls.append((request, result))
+        return actual_from_cost_fn
+
+    captured_commit: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured_commit)
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        cost_fn=cost,
+    )
+    handler_result = "tool ok"
+    result = await gate.awrap_tool_call(tool_call_request, lambda r: handler_result)
+
+    assert result == handler_result
+    assert captured_calls == [(tool_call_request, handler_result)]
+    assert captured_commit["request"].actual.amount == 12_345
+    assert captured_commit["request"].actual.unit == Unit.USD_MICROCENTS
+
+
+@pytest.mark.asyncio
+async def test_async_tool_cost_fn_none_commits_at_estimate(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+) -> None:
+    """async parity: without cost_fn, commit actual equals the configured estimate."""
+    from runcycles import Amount, Unit
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=99_999)
+    captured_commit: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured_commit)
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+    )
+    await gate.awrap_tool_call(tool_call_request, lambda r: "ok")
+
+    assert captured_commit["request"].actual == estimate
+
+
+@pytest.mark.asyncio
+async def test_async_tool_cost_fn_exception_falls_back_to_estimate(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """async parity: a raising cost_fn preserves the tool result and commits estimate."""
+    import logging
+
+    from runcycles import Amount, Unit
+
+    def broken_cost(_request: Any, _result: Any) -> Amount:
+        raise ValueError("tool response shape unrecognized")
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    captured_commit: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured_commit)
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=broken_cost,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="langchain_runcycles.tool_gate"):
+        result = await gate.awrap_tool_call(tool_call_request, lambda r: "tool output")
+
+    assert result == "tool output"
+    assert captured_commit["request"].actual == estimate
+    assert "tool cost_fn raised" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_async_tool_cost_fn_invalid_return_falls_back_to_estimate(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """async parity: invalid cost_fn return values fall back to estimate."""
+    import logging
+
+    from runcycles import Amount, Unit
+
+    def broken_cost(_request: Any, _result: Any) -> Any:
+        return None
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    captured_commit: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured_commit)
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=broken_cost,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="langchain_runcycles.tool_gate"):
+        result = await gate.awrap_tool_call(tool_call_request, lambda r: "tool output")
+
+    assert result == "tool output"
+    assert captured_commit["request"].actual == estimate
+    assert "tool cost_fn returned NoneType instead of Amount" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_async_tool_cost_fn_not_called_in_decide_mode(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+) -> None:
+    """async parity: decide mode has no commit path, so cost_fn is skipped."""
+    cost = MagicMock()
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="decide",
+        cost_fn=cost,
+    )
+    result = await gate.awrap_tool_call(tool_call_request, lambda r: "tool ok")
+
+    assert result == "tool ok"
+    cost.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_tool_cost_fn_used_in_decide_reserve_mode(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+) -> None:
+    """async parity: decide+reserve reaches the same cost_fn-driven commit path."""
+    from runcycles import Amount, Unit
+
+    actual_from_cost_fn = Amount(unit=Unit.USD_MICROCENTS, amount=7_777)
+
+    def cost(_request: Any, _result: Any) -> Amount:
+        return actual_from_cost_fn
+
+    captured_commit: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured_commit)
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="decide+reserve",
+        cost_fn=cost,
+    )
+    await gate.awrap_tool_call(tool_call_request, lambda r: "ok")
+
+    assert captured_commit["request"].actual.amount == 7_777
+
+
 # --- v0.2.3 HTTP-failure handling on settlement paths ----------------------------------
 
 

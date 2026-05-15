@@ -7,9 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-15
+
+Tool-side actual-cost extraction for `CyclesToolGate` — closes the final "commits at estimate" gap documented after the v0.2.0 model-gate `cost_fn` work.
+
 ### Added
 
+- **`cost_fn` parameter on `CyclesToolGate`.** Optional `Callable[[ToolCallRequest, Any], Amount]`. When supplied, the middleware calls `cost_fn(request, result)` after the wrapped tool handler returns and uses the returned `Amount` for `commit_reservation` instead of the configured `estimate`. The request argument exposes `tool_call.name`, args, id, and state, so one router-style extractor can price multiple tools without one gate instance per tool. When unset, behavior remains commit-at-estimate.
+- **`ToolCostFn` type alias** exported from the package root for type-annotating user-supplied tool extractors. The existing `CostFn` alias remains the unary model-gate extractor shape.
+- **`examples/tool_cost_fn.py`** demonstrates router-style tool pricing with `CyclesToolGate.cost_fn`, including request-argument pricing and provider-returned metadata fallback.
 - **Python 3.13 and 3.14 are now declared supported** via PyPI classifiers. The reusable CI matrix was broadened from `["3.10", "3.12"]` to `["3.10", "3.11", "3.12", "3.13", "3.14"]` so lint + mypy + the full test suite run against every declared version on every PR. `AUDIT.md`'s "tested against" line was updated to match.
+
+### Resilience
+
+- **`CyclesToolGate.cost_fn` errors never erase the tool result.** If `cost_fn(request, result)` raises or returns a non-`Amount`, the gate logs a warning and falls back to the configured `estimate` for the commit. The tool result is still returned to the agent. This mirrors `CyclesModelGate.cost_fn` and prevents stale tool-pricing code from breaking the agent loop.
 
 ### Fixed
 
@@ -17,8 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
+- **README, `docs/runcycles.mdx`, and `AUDIT.md`** now document tool-side actual-cost extraction and remove the old `CyclesToolGate` "commits at estimate" limitation. The docs explicitly do not promise built-in tool extractors because tool result shapes and provider pricing are not normalized.
 - **README "Settlement (commit) failures" and `docs/runcycles.mdx` "Settlement-failure policy"** now mention `CyclesModelGate` parity and the non-success-`CyclesResponse` failure path. The prose described `settlement_error_policy` as tool-only and exception-only; v0.2.3 already applies it to both gates and both failure modes (raised exceptions and HTTP-failure responses). `AUDIT.md` and `CHANGELOG.md` were already accurate; this is a prose-drift correction with no behavior change.
 - **README setup and error-handling guidance** now matches the current examples and implementation: the Claude quick start installs `langchain-anthropic` and calls out `ANTHROPIC_API_KEY`, and the error-handling bullets cover both tool-gate and model-gate denial/reservation/handler-exception shapes.
+
+### Coverage
+
+174 tests, 99.63% coverage (gate `fail_under = 95`). New tests cover sync + async `CyclesToolGate.cost_fn` applied / None-fallback / exception-fallback / invalid-return fallback / decide+reserve parity / decide-mode-skip, plus the new example import smoke and JSON-serialized `ToolMessage.content` cost extraction.
+
+### Behavior change
+
+None for existing callers. `cost_fn` is additive; callers who do not pass it keep the v0.2.x commit-at-estimate behavior. Callers who opt in get actual-cost commits for tool calls, with estimate fallback on extractor failure.
+
+### Closes
+
+- [Issue #20](https://github.com/runcycles/langchain-runcycles/issues/20)
 
 ## [0.2.3] - 2026-05-11
 
