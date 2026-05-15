@@ -5,7 +5,8 @@ CyclesToolGate / CyclesFanOutGate. Subject and action can be supplied as
 static values, mappings (action only — subject is static or callable, not
 a mapping), or callables that resolve dynamically from the request and
 agent state. ``CostFn`` is the per-call extractor type for
-``CyclesModelGate.cost_fn`` (v0.2.0+).
+``CyclesModelGate.cost_fn`` (v0.2.0+). ``ToolCostFn`` is the two-argument
+extractor type for ``CyclesToolGate.cost_fn`` (v0.3.0+).
 """
 
 from collections.abc import Callable, Mapping
@@ -59,3 +60,21 @@ If the callable raises or returns a non-``Amount``, the gate logs a warning
 and falls back to the configured ``estimate`` so a costing bug never erases a
 successful model result. Use the provided ``langchain_runcycles.extractors``
 factories for OpenAI / Anthropic shapes, or write your own."""
+
+ToolCostFn: TypeAlias = Callable[[Any, Any], Amount]
+"""(tool_call_request, tool_result) -> Amount.
+
+Per-call cost extractor for ``CyclesToolGate`` (v0.3.0+). The alias uses
+``Any`` for both arguments so the public config surface does not depend on
+LangGraph's runtime request class. At runtime, the first argument is the
+LangChain ``ToolCallRequest`` so extractors can inspect the tool name,
+arguments, call id, and state. The second argument is the wrapped handler's
+result, usually a ``ToolMessage`` but possibly any value returned by the
+runtime or tests.
+
+When supplied, ``CyclesToolGate`` calls ``cost_fn(request, result)`` after the
+tool handler returns and uses the returned ``Amount`` for
+``commit_reservation`` instead of the configured ``estimate``. If the callable
+raises or returns a non-``Amount``, the gate logs a warning and falls back to
+the configured ``estimate`` so a costing bug never erases a successful tool
+result."""

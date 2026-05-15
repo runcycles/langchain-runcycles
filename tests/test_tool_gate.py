@@ -277,15 +277,10 @@ def test_get_tool_call_attribute_path() -> None:
 # --- Tier 2 review-driven additions -------------------------------------------------
 
 
-def test_commit_called_with_configured_estimate(
+def test_without_cost_fn_commit_called_with_configured_estimate(
     sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
 ) -> None:
-    """The reserve-mode commit body must carry actual=self._estimate, not some other amount.
-
-    AUDIT.md documents that v0.1 commits at estimate; this test makes that contract
-    enforceable so a future refactor that changes the commit amount must also update
-    the audit and this assertion.
-    """
+    """Without cost_fn, reserve-mode commit body carries actual=self._estimate."""
     from runcycles import Amount, Unit
 
     custom_estimate = Amount(unit=Unit.USD_MICROCENTS, amount=12_345)
@@ -296,6 +291,141 @@ def test_commit_called_with_configured_estimate(
     args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
     commit_request = args[1]
     assert commit_request.actual == custom_estimate
+
+
+# --- tool cost_fn (v0.3.0+) ----------------------------------------------------------
+
+
+def test_tool_cost_fn_used_for_commit_actual_and_receives_request_result(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """When cost_fn is supplied, commit actual comes from cost_fn(request, result)."""
+    from runcycles import Amount, Unit
+
+    actual_from_cost_fn = Amount(unit=Unit.USD_MICROCENTS, amount=12_345)
+    captured: list[tuple[Any, Any]] = []
+
+    def cost(request: Any, result: Any) -> Amount:
+        captured.append((request, result))
+        return actual_from_cost_fn
+
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        cost_fn=cost,
+    )
+    handler_result = "tool ok"
+    result = gate.wrap_tool_call(tool_call_request, lambda r: handler_result)
+
+    assert result == handler_result
+    assert captured == [(tool_call_request, handler_result)]
+    args, _ = sync_client.commit_reservation.call_args
+    commit_request = args[1]
+    assert commit_request.actual.amount == 12_345
+    assert commit_request.actual.unit == Unit.USD_MICROCENTS
+
+
+def test_tool_cost_fn_exception_falls_back_to_estimate(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """A raising cost_fn must not erase the tool result; commit uses estimate."""
+    from runcycles import Amount, Unit
+
+    def broken_cost(_request: Any, _result: Any) -> Amount:
+        raise ValueError("tool response shape unrecognized")
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=broken_cost,
+    )
+
+    with _capture_warnings("langchain_runcycles.tool_gate") as logs:
+        result = gate.wrap_tool_call(tool_call_request, lambda r: "tool output")
+
+    assert result == "tool output"
+    args, _ = sync_client.commit_reservation.call_args
+    commit_request = args[1]
+    assert commit_request.actual == estimate
+    assert any("tool cost_fn raised" in r.getMessage() for r in logs)
+
+
+def test_tool_cost_fn_invalid_return_falls_back_to_estimate(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """A cost_fn returning the wrong type is a costing bug, not a tool-call failure."""
+    from runcycles import Amount, Unit
+
+    def broken_cost(_request: Any, _result: Any) -> Any:
+        return None
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=broken_cost,
+    )
+
+    with _capture_warnings("langchain_runcycles.tool_gate") as logs:
+        result = gate.wrap_tool_call(tool_call_request, lambda r: "tool output")
+
+    assert result == "tool output"
+    args, _ = sync_client.commit_reservation.call_args
+    commit_request = args[1]
+    assert commit_request.actual == estimate
+    assert any("tool cost_fn returned NoneType instead of Amount" in r.getMessage() for r in logs)
+
+
+def test_tool_cost_fn_not_called_in_decide_mode(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """decide mode has no commit path, so cost_fn must never be invoked."""
+    cost = MagicMock()
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="decide",
+        cost_fn=cost,
+    )
+    result = gate.wrap_tool_call(tool_call_request, lambda r: "tool ok")
+
+    assert result == "tool ok"
+    cost.assert_not_called()
+
+
+def test_tool_cost_fn_used_in_decide_reserve_mode(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    """decide+reserve reaches the same cost_fn-driven commit path as reserve."""
+    from runcycles import Amount, Unit
+
+    actual_from_cost_fn = Amount(unit=Unit.USD_MICROCENTS, amount=7_777)
+
+    def cost(_request: Any, _result: Any) -> Amount:
+        return actual_from_cost_fn
+
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="decide+reserve",
+        cost_fn=cost,
+    )
+    gate.wrap_tool_call(tool_call_request, lambda r: "ok")
+
+    args, _ = sync_client.commit_reservation.call_args
+    commit_request = args[1]
+    assert commit_request.actual.amount == 7_777
 
 
 def test_idempotency_keys_are_deterministic_per_tool_call_id(

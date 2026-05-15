@@ -8,7 +8,8 @@ agent governance triad of model + tool + fan-out:
   ``AIMessage`` carries the denial reason on deny, so the agent terminates
   naturally.
 * :class:`CyclesToolGate` — gates each tool call. Returns a ``ToolMessage``
-  on denial so the model can recover.
+  on denial so the model can recover; optionally commits reservations at
+  tool-specific actual cost via ``cost_fn``.
 * :class:`CyclesFanOutGate` — caps model turns per run and optionally
   consults ``decide()`` on each turn so an external policy service can halt
   fan-out.
@@ -30,6 +31,7 @@ from langchain_runcycles._config import (
     IdempotencyNamespaceResolver,
     SubjectConfig,
     SubjectExtractor,
+    ToolCostFn,
     TurnCounter,
 )
 from langchain_runcycles.fanout import CyclesFanOutGate
@@ -51,6 +53,7 @@ __all__ = [
     "SettlementErrorPolicy",
     "SubjectConfig",
     "SubjectExtractor",
+    "ToolCostFn",
     "TurnCounter",
 ]
 
