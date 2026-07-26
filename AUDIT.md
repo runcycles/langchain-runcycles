@@ -10,12 +10,14 @@
 
 ## 2026-07-26 — publishing and security-workflow maintenance
 
-Dependabot PRs #40, #42, and #43 update the SHA-pinned CodeQL SARIF uploader
-to 4.37.3, checkout to 7.0.1, and `actions/setup-python` to 7.0.0. The setup
-major changes only the action runtime and removes an unused optional input;
-the repository passes no removed input. Middleware code, package dependencies,
-LangChain compatibility, and Cycles lifecycle behavior are unchanged. The full
-test, type, lint, coverage, packaging, and security check set passed.
+Dependabot PRs #39–#43 update OSSF Scorecard to 2.4.4, the SHA-pinned CodeQL
+SARIF uploader to 4.37.3, the PyPI trusted-publishing action to 1.14.1,
+checkout to 7.0.1, and `actions/setup-python` to 7.0.0. The setup major changes
+only the action runtime and removes an unused optional input; the repository
+passes no removed input. Middleware code, package dependencies, LangChain
+compatibility, and Cycles lifecycle behavior are unchanged. The full test,
+type, lint, coverage, packaging, and security check set passed across Python
+3.10–3.14 on all five heads.
 
 ## Summary
 
