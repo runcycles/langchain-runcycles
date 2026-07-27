@@ -3,10 +3,20 @@
 **Date:** 2026-05-10
 **Package:** `langchain-runcycles` v0.2.3
 **LangChain target:** `langchain >= 1.0, < 2.0`, `langchain-core >= 1.0, < 2.0` (tested against `langchain==1.2.18`, `langchain-core==1.3.3`, `langgraph==1.1.10`)
-**Cycles SDK target:** `runcycles >= 0.4.1` (tested against `runcycles==0.4.1`, Python 3.10–3.14)
+**Cycles SDK target:** `runcycles >= 0.5.0` (tested against `runcycles==0.5.0`, Python 3.10–3.14)
 **Server audit:** Cycles protocol conformance is owned by [`cycles-client-python/AUDIT.md`](https://github.com/runcycles/cycles-client-python/blob/main/AUDIT.md). This document audits this package's contract with the LangChain agent middleware API only.
 
 ---
+
+## 2026-07-27 — runcycles floor raised to 0.5.0
+
+`pyproject.toml` raises the `runcycles` dependency floor from `>=0.4.1` to
+`>=0.5.0` (durable commit retries: on-disk journal with replay, POST
+`/v1/events` fallback for expired commits, 429/auth handling that never
+releases spent budget). Dependency-floor change only — no middleware code
+changes; the gates call `commit_reservation` directly, so the SDK's new retry
+engine is not yet engaged here (recommended follow-up). Full suite passed
+against `runcycles==0.5.0`: 174 tests, 99.63% coverage (gate 95%).
 
 ## 2026-07-26 — publishing and security-workflow maintenance
 

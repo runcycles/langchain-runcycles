@@ -51,7 +51,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "runcycles>=0.4.1",
+    "runcycles>=0.5.0",
     "langchain>=1.0,<2.0",
     # Tightened from `>=0.3` per external review — langchain 1.x always pulls
     # langchain-core 1.x transitively; pinning this explicitly avoids a stale

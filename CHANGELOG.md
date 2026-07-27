@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`runcycles` dependency floor raised from `>=0.4.1` to `>=0.5.0`.**
+  runcycles 0.5.0 ships durable commit retries (on-disk journal with replay,
+  POST `/v1/events` fallback for expired commits, and 429/auth handling that
+  never releases spent budget). No middleware code changes: both gates call
+  `commit_reservation` directly, so commit-failure handling still follows
+  `settlement_error_policy`; adopting the SDK's commit retry engine for
+  transient settlement failures is a recommended follow-up.
+
 ## [0.3.0] - 2026-05-15
 
 Tool-side actual-cost extraction for `CyclesToolGate` — closes the final "commits at estimate" gap documented after the v0.2.0 model-gate `cost_fn` work.
