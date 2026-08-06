@@ -31,11 +31,9 @@ from langchain_core.messages import ToolMessage
 from runcycles import (
     Amount,
     AsyncCyclesClient,
-    CommitRequest,
     CyclesClient,
+    CyclesProtocolError,
     DecisionRequest,
-    ReleaseRequest,
-    ReservationCreateRequest,
 )
 
 from langchain_runcycles._config import (
@@ -48,7 +46,6 @@ from langchain_runcycles._config import (
 from langchain_runcycles._internal import (
     _DEFAULT_ESTIMATE,
     coerce_tool_call_id,
-    denial_reason,
     format_denial,
     get_state,
     get_tool_call,
@@ -56,6 +53,7 @@ from langchain_runcycles._internal import (
     make_idempotency_key,
     resolve_action,
     resolve_subject,
+    response_from_protocol_error,
 )
 
 
@@ -116,16 +114,16 @@ class CyclesToolGate(AgentMiddleware):
         self._idempotency_namespace = idempotency_namespace
         self._cost_fn = cost_fn
 
-    def _resolve_actual(self, request: Any, result: Any) -> Amount:
+    def _resolve_actual(self, request: Any, result: Any) -> tuple[Amount, bool]:
         """Resolve the commit ``actual`` from cost_fn or fall back to estimate.
 
-        If ``cost_fn`` is unset, return the configured estimate (v0.2.x parity).
-        If it's set and returns a valid Amount, return its result. If it raises
-        or returns an invalid value, log a warning and fall back to the estimate
-        so a costing bug does not erase the tool result.
+        Return ``(amount, used_estimate)``. If ``cost_fn`` is unset, return the
+        configured estimate. If it raises or returns an invalid value, log a
+        warning and fall back to the estimate so a costing bug does not erase
+        the tool result.
         """
         if self._cost_fn is None:
-            return self._estimate
+            return self._estimate, True
         try:
             actual = self._cost_fn(request, result)
         except Exception:
@@ -133,14 +131,14 @@ class CyclesToolGate(AgentMiddleware):
                 "tool cost_fn raised while computing commit amount; falling back to configured estimate",
                 exc_info=True,
             )
-            return self._estimate
+            return self._estimate, True
         if not isinstance(actual, Amount):
             logger.warning(
                 "tool cost_fn returned %s instead of Amount; falling back to configured estimate",
                 type(actual).__name__,
             )
-            return self._estimate
-        return actual
+            return self._estimate, True
+        return actual, False
 
     def _resolve_namespace(self, ctx: Any) -> str | None:
         """Resolve the optional namespace for this call. Returns None if disabled."""
@@ -197,88 +195,57 @@ class CyclesToolGate(AgentMiddleware):
     ) -> Any:
         assert isinstance(self._client, CyclesClient)
         idem = make_idempotency_key("res", tool_call_id, namespace=namespace)
-        reserve_resp = self._client.create_reservation(
-            ReservationCreateRequest(
-                idempotency_key=idem,
-                subject=subject,
-                action=action,
-                estimate=self._estimate,
-                ttl_ms=self._ttl_ms,
-            )
+        commit_metadata: dict[str, Any] = {}
+        reservation = self._client.stream_reservation(
+            idempotency_key=idem,
+            subject=subject,
+            action=action,
+            estimate=self._estimate,
+            ttl_ms=self._ttl_ms,
+            raise_on_commit_failure=self._settlement_error_policy == "raise",
+            metadata=commit_metadata,
         )
-        if not reserve_resp.is_success:
+        try:
+            reservation.__enter__()
+        except CyclesProtocolError as exc:
             return ToolMessage(
-                content=format_denial(self._denial_message, reserve_resp, tool_name),
-                tool_call_id=tool_call_id,
-            )
-        reservation_id = reserve_resp.get_body_attribute("reservation_id")
-        if not reservation_id:
-            return ToolMessage(
-                content=format_denial(self._denial_message, reserve_resp, tool_name),
+                content=format_denial(self._denial_message, response_from_protocol_error(exc), tool_name),
                 tool_call_id=tool_call_id,
             )
 
         try:
             result = handler(request)
-        except BaseException:
-            # Catch BaseException (not just Exception) so KeyboardInterrupt / SystemExit
-            # also release the reservation rather than leaking it. We re-raise immediately;
-            # _safe_release_sync swallows release-side failures so the original cause wins.
-            self._safe_release_sync(reservation_id, idem)
+        except BaseException as exc:
+            reservation.__exit__(type(exc), exc, exc.__traceback__)
+            if reservation.release_error is not None:
+                logger.warning(
+                    "Cycles release returned HTTP failure for reservation %s: %s",
+                    reservation.reservation_id,
+                    reservation.release_error,
+                )
             raise
 
-        actual = self._resolve_actual(request, result)
-        try:
-            commit_resp = self._client.commit_reservation(
-                reservation_id,
-                CommitRequest(
-                    idempotency_key=f"commit-{idem}",
-                    actual=actual,
-                ),
-            )
-        except Exception:
-            if self._settlement_error_policy == "raise":
-                # Strict governance default: tool ran but commit raised; surface the
-                # exception so the caller can reconcile rather than silently dropping
-                # accounting. Use settlement_error_policy="log" for best-effort UX.
-                raise
-            logger.warning(
-                "Cycles commit raised for reservation %s; settlement_error_policy='log' "
-                "so the tool result is preserved (reservation will expire via TTL)",
-                reservation_id,
-                exc_info=True,
-            )
-            return result
-        if not commit_resp.is_success:
-            if self._settlement_error_policy == "raise":
-                raise RuntimeError(
-                    f"Cycles commit_reservation returned HTTP failure for reservation "
-                    f"{reservation_id}: {denial_reason(commit_resp)}"
+        actual, actual_from_estimate = self._resolve_actual(request, result)
+        if actual.unit != self._estimate.unit:
+            logger.warning("tool cost_fn returned a different unit; falling back to configured estimate")
+            actual = self._estimate
+            actual_from_estimate = True
+        if actual_from_estimate:
+            commit_metadata["actual_source"] = "estimate"
+        reservation.usage.actual_cost = actual.amount
+        reservation.__exit__(None, None, None)
+        if reservation.settlement_error is not None:
+            if reservation.settlement_error.status < 0:
+                logger.warning(
+                    "Cycles commit raised for reservation %s; durable recovery is queued",
+                    reservation.reservation_id,
                 )
-            logger.warning(
-                "Cycles commit returned HTTP failure for reservation %s: %s; "
-                "settlement_error_policy='log' so the tool result is preserved",
-                reservation_id,
-                denial_reason(commit_resp),
-            )
+            else:
+                logger.warning(
+                    "Cycles commit returned HTTP failure for reservation %s; durable recovery is queued",
+                    reservation.reservation_id,
+                )
         return result
-
-    def _safe_release_sync(self, reservation_id: str, idem: str) -> None:
-        assert isinstance(self._client, CyclesClient)
-        try:
-            release_resp = self._client.release_reservation(
-                reservation_id,
-                ReleaseRequest(idempotency_key=f"release-{idem}"),
-            )
-        except Exception:  # pragma: no cover - defensive
-            logger.warning("Cycles release raised for reservation %s", reservation_id, exc_info=True)
-            return
-        if not release_resp.is_success:
-            logger.warning(
-                "Cycles release returned HTTP failure for reservation %s: %s",
-                reservation_id,
-                denial_reason(release_resp),
-            )
 
     # ----------------------------------------------------------------- async
 
@@ -330,24 +297,21 @@ class CyclesToolGate(AgentMiddleware):
     ) -> Any:
         assert isinstance(self._client, AsyncCyclesClient)
         idem = make_idempotency_key("res", tool_call_id, namespace=namespace)
-        reserve_resp = await self._client.create_reservation(
-            ReservationCreateRequest(
-                idempotency_key=idem,
-                subject=subject,
-                action=action,
-                estimate=self._estimate,
-                ttl_ms=self._ttl_ms,
-            )
+        commit_metadata: dict[str, Any] = {}
+        reservation = self._client.stream_reservation(
+            idempotency_key=idem,
+            subject=subject,
+            action=action,
+            estimate=self._estimate,
+            ttl_ms=self._ttl_ms,
+            raise_on_commit_failure=self._settlement_error_policy == "raise",
+            metadata=commit_metadata,
         )
-        if not reserve_resp.is_success:
+        try:
+            await reservation.__aenter__()
+        except CyclesProtocolError as exc:
             return ToolMessage(
-                content=format_denial(self._denial_message, reserve_resp, tool_name),
-                tool_call_id=tool_call_id,
-            )
-        reservation_id = reserve_resp.get_body_attribute("reservation_id")
-        if not reservation_id:
-            return ToolMessage(
-                content=format_denial(self._denial_message, reserve_resp, tool_name),
+                content=format_denial(self._denial_message, response_from_protocol_error(exc), tool_name),
                 tool_call_id=tool_call_id,
             )
 
@@ -355,60 +319,34 @@ class CyclesToolGate(AgentMiddleware):
             result = handler(request)
             if hasattr(result, "__await__"):
                 result = await result
-        except BaseException:
-            # See sync sibling: BaseException is intentional. On asyncio.CancelledError
-            # the await of release may itself surface the cancellation; the original
-            # cause still wins because we re-raise after best-effort release.
-            await self._safe_release_async(reservation_id, idem)
+        except BaseException as exc:
+            await reservation.__aexit__(type(exc), exc, exc.__traceback__)
+            if reservation.release_error is not None:
+                logger.warning(
+                    "Cycles release returned HTTP failure for reservation %s: %s",
+                    reservation.reservation_id,
+                    reservation.release_error,
+                )
             raise
 
-        actual = self._resolve_actual(request, result)
-        try:
-            commit_resp = await self._client.commit_reservation(
-                reservation_id,
-                CommitRequest(
-                    idempotency_key=f"commit-{idem}",
-                    actual=actual,
-                ),
-            )
-        except Exception:
-            if self._settlement_error_policy == "raise":
-                # See sync sibling: governance-first default surfaces commit failure.
-                raise
-            logger.warning(
-                "Cycles commit raised for reservation %s; settlement_error_policy='log' "
-                "so the tool result is preserved (reservation will expire via TTL)",
-                reservation_id,
-                exc_info=True,
-            )
-            return result
-        if not commit_resp.is_success:
-            if self._settlement_error_policy == "raise":
-                raise RuntimeError(
-                    f"Cycles commit_reservation returned HTTP failure for reservation "
-                    f"{reservation_id}: {denial_reason(commit_resp)}"
+        actual, actual_from_estimate = self._resolve_actual(request, result)
+        if actual.unit != self._estimate.unit:
+            logger.warning("tool cost_fn returned a different unit; falling back to configured estimate")
+            actual = self._estimate
+            actual_from_estimate = True
+        if actual_from_estimate:
+            commit_metadata["actual_source"] = "estimate"
+        reservation.usage.actual_cost = actual.amount
+        await reservation.__aexit__(None, None, None)
+        if reservation.settlement_error is not None:
+            if reservation.settlement_error.status < 0:
+                logger.warning(
+                    "Cycles commit raised for reservation %s; durable recovery is queued",
+                    reservation.reservation_id,
                 )
-            logger.warning(
-                "Cycles commit returned HTTP failure for reservation %s: %s; "
-                "settlement_error_policy='log' so the tool result is preserved",
-                reservation_id,
-                denial_reason(commit_resp),
-            )
+            else:
+                logger.warning(
+                    "Cycles commit returned HTTP failure for reservation %s; durable recovery is queued",
+                    reservation.reservation_id,
+                )
         return result
-
-    async def _safe_release_async(self, reservation_id: str, idem: str) -> None:
-        assert isinstance(self._client, AsyncCyclesClient)
-        try:
-            release_resp = await self._client.release_reservation(
-                reservation_id,
-                ReleaseRequest(idempotency_key=f"release-{idem}"),
-            )
-        except Exception:  # pragma: no cover - defensive
-            logger.warning("Cycles release raised for reservation %s", reservation_id, exc_info=True)
-            return
-        if not release_resp.is_success:
-            logger.warning(
-                "Cycles release returned HTTP failure for reservation %s: %s",
-                reservation_id,
-                denial_reason(release_resp),
-            )

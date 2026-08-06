@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import ToolMessage
-from runcycles import Action, AsyncCyclesClient, CyclesClient
+from runcycles import Action, AsyncCyclesClient, CyclesClient, CyclesProtocolError
 
 from langchain_runcycles import CyclesToolGate
 from langchain_runcycles._internal import (
@@ -353,6 +353,7 @@ def test_tool_cost_fn_exception_falls_back_to_estimate(
     args, _ = sync_client.commit_reservation.call_args
     commit_request = args[1]
     assert commit_request.actual == estimate
+    assert commit_request.metadata == {"actual_source": "estimate"}
     assert any("tool cost_fn raised" in r.getMessage() for r in logs)
 
 
@@ -383,6 +384,26 @@ def test_tool_cost_fn_invalid_return_falls_back_to_estimate(
     commit_request = args[1]
     assert commit_request.actual == estimate
     assert any("tool cost_fn returned NoneType instead of Amount" in r.getMessage() for r in logs)
+
+
+def test_tool_cost_fn_unit_mismatch_falls_back_to_estimate(
+    sync_client: CyclesClient, subject: Any, action: Any, tool_call_request: FakeToolCallRequest
+) -> None:
+    from runcycles import Amount, Unit
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    gate = CyclesToolGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=lambda _request, _result: Amount(unit=Unit.TOKENS, amount=999),
+    )
+    gate.wrap_tool_call(tool_call_request, lambda _request: "tool output")
+
+    commit_request = sync_client.commit_reservation.call_args[0][1]  # type: ignore[attr-defined]
+    assert commit_request.actual == estimate
 
 
 def test_tool_cost_fn_not_called_in_decide_mode(
@@ -506,7 +527,7 @@ def test_settlement_raise_default_propagates_commit_failure(
     """
     sync_client.commit_reservation.side_effect = RuntimeError("cycles unavailable")  # type: ignore[attr-defined]
     gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="reserve")
-    with pytest.raises(RuntimeError, match="cycles unavailable"):
+    with pytest.raises(CyclesProtocolError, match="cycles unavailable"):
         gate.wrap_tool_call(tool_call_request, lambda r: "tool ran")
     sync_client.commit_reservation.assert_called_once()  # type: ignore[attr-defined]
 
@@ -559,6 +580,15 @@ def test_make_idempotency_key_no_namespace_keeps_v012_shape() -> None:
     from langchain_runcycles._internal import make_idempotency_key
 
     assert make_idempotency_key("res", "tc_1") == "res-tc_1"
+
+
+def test_make_idempotency_key_hashes_oversized_inputs_deterministically() -> None:
+    from langchain_runcycles._internal import make_idempotency_key
+
+    key = make_idempotency_key("res", "tool-" + "x" * 256, namespace="run-" + "y" * 256)
+    assert key.startswith("res-sha256-")
+    assert len(key) <= 256
+    assert key == make_idempotency_key("res", "tool-" + "x" * 256, namespace="run-" + "y" * 256)
 
 
 def test_idempotency_namespace_as_static_string(
@@ -742,7 +772,7 @@ def test_commit_http_failure_raise_default_propagates(
 
     sync_client.commit_reservation.return_value = commit_failure()  # type: ignore[attr-defined]
     gate = CyclesToolGate(sync_client, subject=subject, action=action, mode="reserve")
-    with pytest.raises(RuntimeError, match="HTTP failure"):
+    with pytest.raises(CyclesProtocolError, match="did not settle"):
         gate.wrap_tool_call(tool_call_request, lambda r: "tool ran")
 
 

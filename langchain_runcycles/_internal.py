@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from runcycles import Action, Amount, CyclesResponse, DecisionResponse, Subject, Unit
+from runcycles import Action, Amount, CyclesProtocolError, CyclesResponse, DecisionResponse, Subject, Unit
 
 from langchain_runcycles._config import ActionConfig, DenialFormatter, SubjectConfig
 
@@ -87,6 +88,19 @@ def denial_reason(response: CyclesResponse) -> str:
     return "denied"
 
 
+def response_from_protocol_error(error: CyclesProtocolError) -> CyclesResponse:
+    """Adapt a lifecycle exception back to the middleware denial formatter."""
+    code = error.error_code or error.reason_code or "UNKNOWN"
+    body: dict[str, Any] = {
+        "error": code,
+        "message": str(error),
+        "request_id": error.request_id or "unknown",
+    }
+    if error.details is not None:
+        body["details"] = error.details
+    return CyclesResponse.http_error(error.status, str(error), body)
+
+
 def format_denial(formatter: DenialFormatter, response: CyclesResponse, tool_name: str | None) -> str:
     """Apply a DenialFormatter to a denied response."""
     if callable(formatter):
@@ -108,9 +122,9 @@ def make_idempotency_key(
     """Build an idempotency key. Deterministic when ``suffix`` is provided.
 
     When ``suffix`` (typically a LangChain ``tool_call_id``) is supplied, the
-    returned key includes it verbatim so retries land on the same Cycles
-    reservation rather than creating duplicates. This is the failure mode
-    Cycles is built to prevent.
+    returned key includes it verbatim when the complete key fits the protocol
+    limit. Oversized combinations use a deterministic SHA-256 form so retries
+    still land on the same Cycles reservation.
 
     Optional ``namespace`` (v0.1.3+) is woven in between prefix and suffix to
     scope keys by run / workflow / tenant — useful when frameworks reuse short
@@ -131,7 +145,11 @@ def make_idempotency_key(
         parts.append(suffix)
     else:
         parts.append(uuid.uuid4().hex)
-    return "-".join(parts)
+    key = "-".join(parts)
+    if len(key) <= 256:
+        return key
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return f"{prefix}-sha256-{digest}"
 
 
 def get_tool_call(request: Any) -> dict[str, Any]:
@@ -164,4 +182,5 @@ __all__ = [
     "parse_decision",
     "resolve_action",
     "resolve_subject",
+    "response_from_protocol_error",
 ]

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-06
+
+### Added
+
+- Reserve-mode model and tool gates now use the Python SDK's managed
+  reservation lifecycle: server-authoritative heartbeats, a pending-commit
+  journal written before the first settlement request, restart replay, and
+  `/v1/events` recovery after reservation expiry.
+- `openai_cost` accepts `cached_prompt_per_million_usd`;
+  `anthropic_cost` accepts cache-read, generic cache-creation, and distinct
+  5-minute/1-hour cache-creation rates. All rates are validated and cache
+  counts are read from normalized
+  `AIMessage.usage_metadata.input_token_details`.
+
+### Changed
+
+- Raised the `runcycles` floor to `>=0.5.3` and the package version to 0.4.0.
+- `settlement_error_policy` now controls surfacing only. Both policies retain
+  known spend for durable recovery; `"raise"` surfaces `CyclesProtocolError`
+  after recovery is queued, while `"log"` returns the handler result.
+- Caller-derived tool reservation keys continue to flow through the managed
+  lifecycle, including deterministic commit and release key derivation.
+- Removed the stale unpublished `docs/runcycles.mdx` mirror. The README and
+  the Cycles website are the maintained package documentation.
+
+### Fixed
+
+- Long-running handlers no longer outlive an unextended 60-second reservation.
+- A transient commit failure can no longer disappear when the process exits,
+  and a commit rejection after known spend no longer triggers a release.
+- Oversized namespace/tool-call key combinations now use a bounded,
+  deterministic SHA-256 form instead of violating the protocol key limit.
+- Documentation now distinguishes completed-stream guarantees from interrupted
+  streams, which may require provider-billing reconciliation because LangChain
+  has not produced finalized normalized usage.
+
 ## [0.3.1] - 2026-07-27
 
 ### Changed

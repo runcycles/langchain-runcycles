@@ -12,7 +12,11 @@ from runcycles import Unit
 from langchain_runcycles.extractors import anthropic_cost, openai_cost
 
 
-def _model_response_with_usage(input_tokens: int, output_tokens: int) -> ModelResponse:
+def _model_response_with_usage(
+    input_tokens: int,
+    output_tokens: int,
+    input_token_details: dict[str, int] | None = None,
+) -> ModelResponse:
     """Build a ModelResponse whose first AIMessage carries LangChain's normalized
     usage_metadata shape. Both providers normalize to input/output naming via the
     LangChain integration packages."""
@@ -22,6 +26,7 @@ def _model_response_with_usage(input_tokens: int, output_tokens: int) -> ModelRe
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
+            **({"input_token_details": input_token_details} if input_token_details else {}),
         },
     )
     return ModelResponse(result=[msg])
@@ -45,6 +50,98 @@ def test_anthropic_cost_computes_correct_microcents() -> None:
     amount = cost_fn(response)
     assert amount.unit == Unit.USD_MICROCENTS
     assert amount.amount == 2_100_000
+
+
+def test_openai_cost_prices_cached_input_separately() -> None:
+    cost_fn = openai_cost(
+        prompt_per_million_usd=2.50,
+        cached_prompt_per_million_usd=1.25,
+        completion_per_million_usd=10.00,
+    )
+    response = _model_response_with_usage(
+        input_tokens=1_000,
+        output_tokens=0,
+        input_token_details={"cache_read": 400},
+    )
+    # 600 ordinary input + 400 cached input = $0.002 = 200,000 microcents.
+    assert cost_fn(response).amount == 200_000
+
+
+def test_anthropic_cost_prices_cache_read_and_creation_separately() -> None:
+    cost_fn = anthropic_cost(
+        input_per_million_usd=3.00,
+        output_per_million_usd=15.00,
+        cache_read_per_million_usd=0.30,
+        cache_creation_per_million_usd=3.75,
+    )
+    response = _model_response_with_usage(
+        input_tokens=1_000,
+        output_tokens=0,
+        input_token_details={"cache_read": 200, "cache_creation": 300},
+    )
+    # 500 ordinary + 200 cache reads + 300 cache writes = $0.002685.
+    assert cost_fn(response).amount == 268_500
+
+
+def test_anthropic_cache_creation_tiers_are_priced_independently() -> None:
+    cost_fn = anthropic_cost(
+        input_per_million_usd=3.00,
+        output_per_million_usd=15.00,
+        cache_read_per_million_usd=0.30,
+        cache_creation_5m_per_million_usd=3.75,
+        cache_creation_1h_per_million_usd=6.00,
+    )
+    response = _model_response_with_usage(
+        input_tokens=1_000,
+        output_tokens=100,
+        input_token_details={
+            "cache_read": 100,
+            "cache_creation": 600,
+            "ephemeral_5m_input_tokens": 200,
+            "ephemeral_1h_input_tokens": 300,
+        },
+    )
+
+    # 300 ordinary @ $3/M + 100 read @ $0.30/M + 100 unclassified write @
+    # $3/M + 200 5m write @ $3.75/M + 300 1h write @ $6/M + 100 output @ $15/M.
+    assert cost_fn(response).amount == 528_000
+
+
+def test_anthropic_cache_creation_tiers_cannot_exceed_creation_total() -> None:
+    cost_fn = anthropic_cost(input_per_million_usd=3.00, output_per_million_usd=15.00)
+    response = _model_response_with_usage(
+        input_tokens=1_000,
+        output_tokens=0,
+        input_token_details={
+            "cache_creation": 100,
+            "ephemeral_5m_input_tokens": 75,
+            "ephemeral_1h_input_tokens": 50,
+        },
+    )
+
+    with pytest.raises(ValueError, match="tier counts"):
+        cost_fn(response)
+
+
+@pytest.mark.parametrize("rate", [-1.0, float("inf"), float("nan")])
+def test_invalid_pricing_rate_is_rejected(rate: float) -> None:
+    with pytest.raises(ValueError, match="finite, non-negative"):
+        openai_cost(prompt_per_million_usd=rate, completion_per_million_usd=10.0)
+
+
+def test_cache_details_cannot_exceed_total_input() -> None:
+    cost_fn = openai_cost(
+        prompt_per_million_usd=2.50,
+        cached_prompt_per_million_usd=1.25,
+        completion_per_million_usd=10.00,
+    )
+    response = _model_response_with_usage(
+        input_tokens=10,
+        output_tokens=0,
+        input_token_details={"cache_read": 11},
+    )
+    with pytest.raises(ValueError, match="cannot exceed"):
+        cost_fn(response)
 
 
 def test_zero_tokens_yields_zero_microcents() -> None:

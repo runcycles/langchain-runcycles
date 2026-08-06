@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain.agents.middleware import ModelResponse
 from langchain_core.messages import AIMessage
-from runcycles import AsyncCyclesClient, CyclesClient, CyclesResponse
+from runcycles import AsyncCyclesClient, CyclesClient, CyclesProtocolError, CyclesResponse
 
 from langchain_runcycles import CyclesModelGate
 from tests.conftest import FakeModelRequest, deny_response, reserve_failure
@@ -118,7 +118,7 @@ async def test_async_settlement_raise_default(
     async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
     gate = CyclesModelGate(async_client, subject=subject, action=action, mode="reserve")
     handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
-    with pytest.raises(RuntimeError, match="cycles unavailable"):
+    with pytest.raises(CyclesProtocolError, match="cycles unavailable"):
         await gate.awrap_model_call(model_request, handler)
 
 
@@ -190,7 +190,7 @@ async def test_async_commit_http_failure_raise_default_propagates(
     async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
     gate = CyclesModelGate(async_client, subject=subject, action=action, mode="reserve")
     handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
-    with pytest.raises(RuntimeError, match="HTTP failure"):
+    with pytest.raises(CyclesProtocolError, match="did not settle"):
         await gate.awrap_model_call(model_request, handler)
 
 
@@ -382,6 +382,34 @@ async def test_async_cost_fn_invalid_return_falls_back_to_estimate(
     assert result is handler_result
 
     assert captured["request"].actual.amount == 42
+    assert captured["request"].metadata == {"actual_source": "estimate"}
+
+
+@pytest.mark.asyncio
+async def test_async_cost_fn_unit_mismatch_marks_estimate_source(
+    async_client: AsyncCyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    """A differently denominated measurement cannot settle this reservation."""
+    from runcycles import Amount, Unit
+
+    captured: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured)
+    gate = CyclesModelGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=Amount(unit=Unit.USD_MICROCENTS, amount=42),
+        cost_fn=lambda _result: Amount(unit=Unit.TOKENS, amount=7),
+    )
+
+    await gate.awrap_model_call(
+        model_request,
+        MagicMock(return_value=ModelResponse(result=[AIMessage(content="model output")])),
+    )
+
+    assert captured["request"].actual == Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    assert captured["request"].metadata == {"actual_source": "estimate"}
 
 
 @pytest.mark.asyncio

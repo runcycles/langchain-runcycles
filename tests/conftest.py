@@ -28,6 +28,7 @@ warnings.filterwarnings(
 )
 
 from collections.abc import Iterator  # noqa: E402
+from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 from unittest.mock import MagicMock  # noqa: E402
 
@@ -57,10 +58,12 @@ def deny_response(reason_code: str = "BUDGET_EXCEEDED") -> CyclesResponse:
 
 def reserve_success(reservation_id: str = "rsv_test_1") -> CyclesResponse:
     return CyclesResponse.success(
-        201,
+        200,
         {
             "decision": "ALLOW",
             "reservation_id": reservation_id,
+            "expires_at_ms": 9_000_000_000_000,
+            "remaining_ttl_ms": 60_000,
             "affected_scopes": [],
         },
     )
@@ -97,13 +100,20 @@ def release_ok() -> CyclesResponse:
 
 
 @pytest.fixture
-def sync_client() -> Iterator[CyclesClient]:
-    config = CyclesConfig(base_url="http://test", api_key="test-key", tenant="acme")
+def sync_client(tmp_path: Path) -> Iterator[CyclesClient]:
+    config = CyclesConfig(
+        base_url="http://test",
+        api_key="test-key",
+        tenant="acme",
+        journal_dir=str(tmp_path / "journal"),
+        retry_enabled=False,
+    )
     client = CyclesClient(config)
     client.decide = MagicMock(return_value=allow_response())  # type: ignore[method-assign]
     client.create_reservation = MagicMock(return_value=reserve_success())  # type: ignore[method-assign]
     client.commit_reservation = MagicMock(return_value=commit_ok())  # type: ignore[method-assign]
     client.release_reservation = MagicMock(return_value=release_ok())  # type: ignore[method-assign]
+    client.extend_reservation = MagicMock()  # type: ignore[method-assign]
     yield client
     client.close()
 
@@ -114,8 +124,14 @@ def sync_client() -> Iterator[CyclesClient]:
 # is issued, the underlying connection pool is empty — letting GC reclaim it is fine
 # for short-lived test runs. Convert to @pytest_asyncio.fixture if real HTTP is added.
 @pytest.fixture
-def async_client() -> Iterator[AsyncCyclesClient]:
-    config = CyclesConfig(base_url="http://test", api_key="test-key", tenant="acme")
+def async_client(tmp_path: Path) -> Iterator[AsyncCyclesClient]:
+    config = CyclesConfig(
+        base_url="http://test",
+        api_key="test-key",
+        tenant="acme",
+        journal_dir=str(tmp_path / "journal"),
+        retry_enabled=False,
+    )
     client = AsyncCyclesClient(config)
 
     async def _decide(_request: Any) -> CyclesResponse:
@@ -130,15 +146,23 @@ def async_client() -> Iterator[AsyncCyclesClient]:
     async def _release(_rid: Any, _request: Any) -> CyclesResponse:
         return _release.return_value  # type: ignore[attr-defined]
 
+    async def _extend(_rid: Any, _request: Any) -> CyclesResponse:
+        return _extend.return_value  # type: ignore[attr-defined]
+
     _decide.return_value = allow_response()  # type: ignore[attr-defined]
     _create.return_value = reserve_success()  # type: ignore[attr-defined]
     _commit.return_value = commit_ok()  # type: ignore[attr-defined]
     _release.return_value = release_ok()  # type: ignore[attr-defined]
+    _extend.return_value = CyclesResponse.success(
+        200,
+        {"status": "EXTENDED", "expires_at_ms": 9_000_000_060_000, "remaining_ttl_ms": 60_000},
+    )  # type: ignore[attr-defined]
 
     client.decide = _decide  # type: ignore[method-assign]
     client.create_reservation = _create  # type: ignore[method-assign]
     client.commit_reservation = _commit  # type: ignore[method-assign]
     client.release_reservation = _release  # type: ignore[method-assign]
+    client.extend_reservation = _extend  # type: ignore[method-assign]
     yield client
 
 
