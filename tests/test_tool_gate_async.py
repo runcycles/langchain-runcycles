@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import ToolMessage
-from runcycles import AsyncCyclesClient, CyclesClient, CyclesResponse
+from runcycles import AsyncCyclesClient, CyclesClient, CyclesProtocolError, CyclesResponse
 
 from langchain_runcycles import CyclesToolGate
 from tests.conftest import FakeToolCallRequest, allow_response, deny_response, reserve_failure
@@ -156,7 +156,7 @@ async def test_async_settlement_raise_default_propagates_commit_failure(
 
     async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
     gate = CyclesToolGate(async_client, subject=subject, action=action, mode="reserve")
-    with pytest.raises(RuntimeError, match="cycles unavailable"):
+    with pytest.raises(CyclesProtocolError, match="cycles unavailable"):
         await gate.awrap_tool_call(tool_call_request, lambda r: "tool ran")
 
 
@@ -428,6 +428,33 @@ async def test_async_tool_cost_fn_used_in_decide_reserve_mode(
     assert captured_commit["request"].actual.amount == 7_777
 
 
+@pytest.mark.asyncio
+async def test_async_tool_cost_fn_unit_mismatch_marks_estimate_source(
+    async_client: AsyncCyclesClient,
+    subject: Any,
+    action: Any,
+    tool_call_request: FakeToolCallRequest,
+) -> None:
+    """A differently denominated tool result falls back to the estimate."""
+    from runcycles import Amount, Unit
+
+    captured_commit: dict[str, Any] = {}
+    _capture_commit_actual(async_client, captured_commit)
+    gate = CyclesToolGate(
+        async_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=Amount(unit=Unit.USD_MICROCENTS, amount=42),
+        cost_fn=lambda _request, _result: Amount(unit=Unit.TOKENS, amount=7),
+    )
+
+    await gate.awrap_tool_call(tool_call_request, lambda _request: "ok")
+
+    assert captured_commit["request"].actual == Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    assert captured_commit["request"].metadata == {"actual_source": "estimate"}
+
+
 # --- v0.2.3 HTTP-failure handling on settlement paths ----------------------------------
 
 
@@ -446,7 +473,7 @@ async def test_async_commit_http_failure_raise_default_propagates(
 
     async_client.commit_reservation = failing_commit  # type: ignore[method-assign]
     gate = CyclesToolGate(async_client, subject=subject, action=action, mode="reserve")
-    with pytest.raises(RuntimeError, match="HTTP failure"):
+    with pytest.raises(CyclesProtocolError, match="did not settle"):
         await gate.awrap_tool_call(tool_call_request, lambda r: "tool ran")
 
 

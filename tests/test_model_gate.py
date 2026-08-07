@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain.agents.middleware import ModelResponse
 from langchain_core.messages import AIMessage
-from runcycles import AsyncCyclesClient, CyclesClient, CyclesResponse
+from runcycles import AsyncCyclesClient, CyclesClient, CyclesProtocolError, CyclesResponse
 
 from langchain_runcycles import CyclesModelGate
 from tests.conftest import FakeModelRequest, deny_response, reserve_failure
@@ -173,7 +173,7 @@ def test_settlement_raise_default_propagates_commit_failure(
     sync_client.commit_reservation.side_effect = RuntimeError("cycles unavailable")  # type: ignore[attr-defined]
     gate = CyclesModelGate(sync_client, subject=subject, action=action, mode="reserve")
     handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
-    with pytest.raises(RuntimeError, match="cycles unavailable"):
+    with pytest.raises(CyclesProtocolError, match="cycles unavailable"):
         gate.wrap_model_call(model_request, handler)
     sync_client.commit_reservation.assert_called_once()  # type: ignore[attr-defined]
 
@@ -345,6 +345,7 @@ def test_cost_fn_none_commits_at_estimate(
     commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
     commit_request = commit_args[1]
     assert commit_request.actual.amount == 99_999
+    assert commit_request.metadata == {"actual_source": "estimate"}
 
 
 def test_cost_fn_exception_falls_back_to_estimate(
@@ -403,6 +404,26 @@ def test_cost_fn_invalid_return_falls_back_to_estimate(
     commit_args, _ = sync_client.commit_reservation.call_args  # type: ignore[attr-defined]
     commit_request = commit_args[1]
     assert commit_request.actual.amount == 42
+
+
+def test_cost_fn_unit_mismatch_falls_back_to_estimate(
+    sync_client: CyclesClient, subject: Any, action: Any, model_request: FakeModelRequest
+) -> None:
+    from runcycles import Amount, Unit
+
+    estimate = Amount(unit=Unit.USD_MICROCENTS, amount=42)
+    gate = CyclesModelGate(
+        sync_client,
+        subject=subject,
+        action=action,
+        mode="reserve",
+        estimate=estimate,
+        cost_fn=lambda _result: Amount(unit=Unit.TOKENS, amount=999),
+    )
+    gate.wrap_model_call(model_request, MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")])))
+
+    commit_request = sync_client.commit_reservation.call_args[0][1]  # type: ignore[attr-defined]
+    assert commit_request.actual == estimate
 
 
 def test_cost_fn_not_called_in_decide_mode(
@@ -468,7 +489,7 @@ def test_commit_http_failure_raise_default_propagates(
     sync_client.commit_reservation.return_value = commit_failure()  # type: ignore[attr-defined]
     gate = CyclesModelGate(sync_client, subject=subject, action=action, mode="reserve")
     handler = MagicMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
-    with pytest.raises(RuntimeError, match="HTTP failure"):
+    with pytest.raises(CyclesProtocolError, match="did not settle"):
         gate.wrap_model_call(model_request, handler)
 
 

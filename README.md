@@ -10,8 +10,8 @@
 
 Built on LangChain's [`AgentMiddleware`](https://docs.langchain.com/oss/python/langchain/middleware/) API:
 
-- **`wrap_model_call`** — pre-model-call authorization plus optional reserve/commit/release lifecycle around each LLM invocation (v0.1.5+)
-- **`wrap_tool_call`** — tool-call authorization plus optional reserve/commit/release lifecycle around each tool execution
+- **`wrap_model_call`** — pre-model-call authorization plus an optional heartbeat-protected, durably settled reservation around each LLM invocation
+- **`wrap_tool_call`** — tool-call authorization plus the same lifecycle around each tool execution
 - **`before_model`** (with `@hook_config(can_jump_to=["end"])`) — fan-out caps and external policy halts before another model turn
 
 Per-call actual-cost extraction is available on `CyclesModelGate` via `cost_fn` (v0.2.0+) and `CyclesToolGate` via `cost_fn` (v0.3.0+). Model extractors receive the wrapped `ModelResponse`; tool extractors receive `(ToolCallRequest, result)` so one router can price different tools by name, arguments, and returned metadata. `langchain_runcycles.extractors` ships `openai_cost` and `anthropic_cost` factories for model-token usage. Tool providers don't share one cost shape, so tool pricing is user-supplied. For non-agent LangChain code (bare chains, RAG runnables), the `BaseCallbackHandler` recipe in [`cycles-client-python/examples/langchain_integration.py`](https://github.com/runcycles/cycles-client-python/blob/main/examples/langchain_integration.py) remains the right tool.
@@ -21,7 +21,7 @@ Install via `pip install langchain-runcycles`.
 ## What's in the box
 
 - **`CyclesModelGate`** (v0.1.5+) — runs before every model call. Authorizes via `client.decide()` and/or reserves budget. Returns a `ModelResponse` carrying the denial reason on deny so the agent terminates naturally.
-- **`CyclesToolGate`** — runs before every tool call. Authorizes via `client.decide()` and/or reserves budget via `client.create_reservation()`. Returns a `ToolMessage` on denial so the model can recover gracefully.
+- **`CyclesToolGate`** — runs before every tool call. Authorizes and/or reserves budget before execution. Returns a `ToolMessage` on denial so the model can recover gracefully.
 - **`CyclesFanOutGate`** — runs before every model turn. Halts the agent (with `jump_to: "end"`) when a turn cap is hit or when an external policy says to stop. Useful for runaway-loop protection and per-tenant burst caps.
 
 All three work with sync or async LangChain agents and the sync (`CyclesClient`) or async (`AsyncCyclesClient`) Cycles client. Compose them in a single `middleware=[...]` list — typical order is `[CyclesFanOutGate, CyclesModelGate, CyclesToolGate]` so fan-out caps trigger before model spend before tool side effects.
@@ -32,7 +32,7 @@ All three work with sync or async LangChain agents and the sync (`CyclesClient`)
 pip install langchain-runcycles langchain-anthropic
 ```
 
-Requires Python 3.10+ and `langchain >= 1.0`. The quick start below uses Claude, so install `langchain-anthropic` too and set `ANTHROPIC_API_KEY`.
+Requires Python 3.10+, `langchain >= 1.0`, and `runcycles >= 0.5.3`. The quick start below uses Claude, so install `langchain-anthropic` too and set `ANTHROPIC_API_KEY`.
 
 ## Quick Start
 
@@ -79,7 +79,7 @@ model_gate = CyclesModelGate(
 )
 ```
 
-> Add `cost_fn=openai_cost(prompt_per_million_usd=2.50, completion_per_million_usd=10.00)` (or `anthropic_cost(...)`, or a custom `Callable[[ModelResponse], Amount]`) to commit at actual reported token usage instead of `estimate` (v0.2.0+). See the "Actual-cost extraction on `CyclesModelGate`" section below for the full pattern.
+> Add `cost_fn=openai_cost(prompt_per_million_usd=2.50, cached_prompt_per_million_usd=1.25, completion_per_million_usd=10.00)` (or `anthropic_cost(...)`, or a custom `Callable[[ModelResponse], Amount]`) to calculate the debit from normalized reported token usage instead of using `estimate`. See the full pattern below.
 
 ### `CyclesToolGate`
 
@@ -162,7 +162,7 @@ def derive(request):
 
 ### Idempotency-key namespacing (v0.1.3+)
 
-Cycles idempotency keys default to `{prefix}-{tool_call_id}` — deterministic per tool call so retries land on the same reservation. If your runtime can reuse short tool-call ids across runs (`tc_1`, `tc_2`, ...), set `idempotency_namespace` on the middleware to scope keys by run / workflow / tenant. Keys then become `{prefix}-{namespace}-{tool_call_id}`.
+Cycles idempotency keys default to `{prefix}-{tool_call_id}` — deterministic per tool call so retries land on the same reservation. If your runtime can reuse short tool-call ids across runs (`tc_1`, `tc_2`, ...), set `idempotency_namespace` on the middleware to scope keys by run / workflow / tenant. Keys then become `{prefix}-{namespace}-{tool_call_id}`. Combinations longer than the protocol's 256-character limit use a deterministic SHA-256 key instead.
 
 ```python
 # Static — same namespace every call
@@ -202,28 +202,38 @@ from langchain_runcycles import CyclesModelGate
 from langchain_runcycles.extractors import anthropic_cost, openai_cost
 from runcycles import Action, Amount, Subject, Unit
 
-# OpenAI gpt-4o pricing (2026-05): $2.50/M input, $10.00/M output
+# Example GPT-4o rates; verify current provider pricing before deployment.
 gate = CyclesModelGate(
     client,
     subject=Subject(tenant="acme"),
     action=Action(kind="llm.completion", name="gpt-4o"),
     mode="reserve",
     estimate=Amount(unit=Unit.USD_MICROCENTS, amount=2_000_000),  # worst-case headroom
-    cost_fn=openai_cost(prompt_per_million_usd=2.50, completion_per_million_usd=10.00),
+    cost_fn=openai_cost(
+        prompt_per_million_usd=2.50,
+        cached_prompt_per_million_usd=1.25,
+        completion_per_million_usd=10.00,
+    ),
 )
 
-# Anthropic claude-sonnet-4-6 pricing (2026-05): $3.00/M input, $15.00/M output
+# Example Claude Sonnet 4.6 rates, including both cache-write tiers.
 gate = CyclesModelGate(
     client,
     subject=Subject(tenant="acme"),
     action=Action(kind="llm.completion", name="claude-sonnet-4-6"),
     mode="reserve",
     estimate=Amount(unit=Unit.USD_MICROCENTS, amount=2_500_000),
-    cost_fn=anthropic_cost(input_per_million_usd=3.00, output_per_million_usd=15.00),
+    cost_fn=anthropic_cost(
+        input_per_million_usd=3.00,
+        output_per_million_usd=15.00,
+        cache_read_per_million_usd=0.30,
+        cache_creation_5m_per_million_usd=3.75,
+        cache_creation_1h_per_million_usd=6.00,
+    ),
 )
 ```
 
-Both factories read `AIMessage.usage_metadata` (LangChain's normalized usage shape, populated by `langchain-openai` and `langchain-anthropic`) and return an `Amount` in `USD_MICROCENTS`. Pricing arguments are keyword-only so they can't be swapped accidentally.
+Both factories read `AIMessage.usage_metadata` (LangChain's normalized usage shape, populated by `langchain-openai` and `langchain-anthropic`) and return a calculated `Amount` in `USD_MICROCENTS`. Cache reads/writes are read from `input_token_details`; Anthropic's `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` are priced independently when their rates are supplied. If a tier rate is omitted, those tokens use the generic cache-creation rate and then the ordinary input rate for backward compatibility. Pricing arguments are keyword-only and caller supplied—verify them against the [OpenAI](https://developers.openai.com/api/docs/pricing) or [Anthropic](https://docs.anthropic.com/en/docs/about-claude/pricing) pricing page for the exact model and cache tier you deploy.
 
 You can also pass a custom `cost_fn: Callable[[ModelResponse], Amount]` — the middleware calls it after the wrapped handler returns and uses the returned `Amount` for the commit. **If your callable raises or returns a non-`Amount`, the gate logs a warning and falls back to `estimate`** — a costing bug never erases the model result.
 
@@ -302,12 +312,14 @@ gate = CyclesToolGate(
 
 ### Settlement (commit) failures
 
-In `"reserve"` and `"decide+reserve"` modes, the gated handler (tool call or model call) runs first, then the reservation is committed. If commit fails — either by **raising an exception** (network blip, server unreachable) or by **returning a non-success `CyclesResponse`** (4xx/5xx from the Cycles server) — the handler already ran and its result/side-effect is real. `settlement_error_policy` on **both `CyclesToolGate` and `CyclesModelGate`** controls what happens next, identically across both gates and both failure modes:
+In `"reserve"` and `"decide+reserve"` modes, the SDK heartbeats the reservation while the handler runs. After success it writes the known spend to the local commit journal *before* the first commit request. Transient failures replay with the same key after restart; if the reservation expires first, recovery records the spend through `POST /v1/events`. Known spend is never released after a commit failure.
+
+`settlement_error_policy` controls only what the current LangChain call observes after recovery has been queued:
 
 | Policy | Behavior | When to choose |
 |---|---|---|
-| `"raise"` (default) | Propagate the failure: original exception on raised path, `RuntimeError` carrying the server's `denial_reason` on the non-success-response path. Handler result is lost. | Strict governance — no handler-level cost can go unaccounted. |
-| `"log"` | Log a warning, return the handler result anyway. The reservation will eventually expire via TTL. | UX-first — keep the agent moving, accept best-effort accounting. |
+| `"raise"` (default) | Raise `CyclesProtocolError` after durable recovery is queued. Handler result is not returned. | The caller must stop or explicitly reconcile. |
+| `"log"` | Log the synchronous failure and return the handler result; durable recovery remains queued. | Non-idempotent side effects should not be repeated by an agent retry. |
 
 ```python
 # Same parameter on both gates:
@@ -324,7 +336,7 @@ model_gate = CyclesModelGate(
 )
 ```
 
-**Trade-off worth understanding:** `"raise"` surfaces the commit failure to the agent, which may retry — at which point the handler's side effect (e.g. an email send, a payment, a CRM write, or a paid model call) **repeats**. Choose `"log"` if your handler's side effects are not safely idempotent on retry.
+**Trade-off worth understanding:** `"raise"` may prompt the agent or caller to repeat an already completed side effect (email, payment, CRM write, or paid model call). The accounting recovery is idempotent, but the external side effect may not be. Choose `"log"` when repeating the action would be worse than returning while recovery runs.
 
 This only affects commit (success-path settlement); release on handler failure always logs and continues so the original handler exception wins.
 
@@ -344,7 +356,9 @@ await agent.ainvoke({"messages": [...]})
 
 ### Streaming
 
-`agent.astream(...)` and `agent.astream_events(...)` are fully supported (v0.2.1+). LangChain's `BaseChatModel.ainvoke` consumes the model's streaming generator internally and merges per-chunk `usage_metadata` into the final `AIMessage` before our `awrap_model_call` ever sees it. So `CyclesModelGate.cost_fn` fires exactly once per model turn — on the aggregated total — and `commit_reservation` debits the actual cost in one shot, not per-chunk. Stream cancellations (consumer disconnect, `asyncio.CancelledError`) trigger `release_reservation` via our `except BaseException:` guard. Locked down by `tests/test_model_gate_streaming.py`; full audit in `AUDIT.md#streaming-contract-v021`.
+Completed `agent.astream(...)` and `agent.astream_events(...)` calls are supported. LangChain merges per-chunk `usage_metadata` into the final `AIMessage` before `awrap_model_call` returns, so `CyclesModelGate.cost_fn` runs once on the aggregated total. The reservation is heartbeated during the call and durably settled afterward.
+
+If a stream is cancelled or fails before LangChain produces a final response, the gate releases the reservation because it has no finalized normalized usage to commit. Provider-side charges from a partially consumed stream are therefore outside this middleware's evidence boundary and should be reconciled from provider billing telemetry.
 
 ## Examples
 
@@ -355,7 +369,7 @@ await agent.ainvoke({"messages": [...]})
 ## Known limitations
 
 - **Per-call subject only via the extractor form.** Static `Subject` pins one tenant per middleware instance. For per-tenant/per-agent routing in a multi-tenant deployment, supply a `SubjectExtractor` callable.
-- **Idempotency keys are deterministic only when `tool_call_id` is present.** Keys take the shape `{prefix}-{tool_call_id}` so retries land on the same Cycles reservation. If the upstream omits `tool_call_id`, the middleware synthesizes a fresh `missing-<hex>` id (and logs a warning) — that path is non-deterministic across retries because the synthesis itself is random. Conformant LangChain runtimes always supply `id`.
+- **Tool reservation keys are retry-stable only when `tool_call_id` is present.** Keys take the shape `{prefix}-{tool_call_id}`. If the upstream omits `tool_call_id`, the middleware synthesizes a fresh `missing-<hex>` id, so that fallback is not stable across redispatches. Model and fan-out calls have no equivalent upstream call id and use a fresh UUID inside the optional namespace.
 
 ## Development
 
@@ -369,7 +383,8 @@ mypy langchain_runcycles
 
 ## Documentation
 
-- LangChain integration page: https://docs.langchain.com/oss/python/integrations/middleware/runcycles (pending PR review)
+- LangChain middleware integrations listing: https://docs.langchain.com/oss/python/integrations/middleware
+- Canonical Cycles LangChain guide: https://runcycles.io/guides/integrating-cycles-with-langchain
 - Cycles protocol & SDK: https://runcycles.io
 - Architecture: see [AUDIT.md](AUDIT.md)
 

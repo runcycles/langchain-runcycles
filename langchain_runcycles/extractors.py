@@ -33,6 +33,7 @@ Example::
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from runcycles import Amount, Unit
@@ -83,10 +84,28 @@ def _token_count(usage: dict[str, Any], key: str) -> int:
     return tokens
 
 
+def _optional_detail_count(usage: dict[str, Any], key: str) -> int:
+    details = usage.get("input_token_details")
+    if details is None:
+        return 0
+    if not isinstance(details, dict):
+        raise ValueError("AIMessage.usage_metadata['input_token_details'] must be a dict.")
+    if key not in details:
+        return 0
+    return _token_count(details, key)
+
+
+def _validate_rates(**rates: float | None) -> None:
+    for name, rate in rates.items():
+        if rate is not None and (not math.isfinite(rate) or rate < 0):
+            raise ValueError(f"{name} must be a finite, non-negative price.")
+
+
 def openai_cost(
     *,
     prompt_per_million_usd: float,
     completion_per_million_usd: float,
+    cached_prompt_per_million_usd: float | None = None,
 ) -> CostFn:
     """Build a ``cost_fn`` for OpenAI-shaped responses.
 
@@ -96,16 +115,32 @@ def openai_cost(
     per-million-token pricing and returns the total as a
     :class:`runcycles.Amount` in ``USD_MICROCENTS``.
 
-    The keyword-only API forces callers to label the two rates so they
+    Pass ``cached_prompt_per_million_usd`` to price cache reads separately;
+    without it, cached input uses the ordinary prompt rate for backward
+    compatibility. The keyword-only API forces callers to label the rates so they
     can't accidentally swap input and output pricing (which differ ~4x
     on most OpenAI models)."""
+
+    _validate_rates(
+        prompt_per_million_usd=prompt_per_million_usd,
+        completion_per_million_usd=completion_per_million_usd,
+        cached_prompt_per_million_usd=cached_prompt_per_million_usd,
+    )
 
     def _cost_fn(result: Any) -> Amount:
         usage = _extract_usage(result)
         input_tokens = _token_count(usage, "input_tokens")
         output_tokens = _token_count(usage, "output_tokens")
+        cached_tokens = _optional_detail_count(usage, "cache_read")
+        if cached_tokens > input_tokens:
+            raise ValueError("cached input token count cannot exceed total input_tokens.")
+        uncached_tokens = input_tokens - cached_tokens
+        cached_rate = cached_prompt_per_million_usd
+        if cached_rate is None:
+            cached_rate = prompt_per_million_usd
         usd = (
-            input_tokens * prompt_per_million_usd
+            uncached_tokens * prompt_per_million_usd
+            + cached_tokens * cached_rate
             + output_tokens * completion_per_million_usd
         ) / 1_000_000
         microcents = int(round(usd * _USD_TO_MICROCENTS))
@@ -118,6 +153,10 @@ def anthropic_cost(
     *,
     input_per_million_usd: float,
     output_per_million_usd: float,
+    cache_read_per_million_usd: float | None = None,
+    cache_creation_per_million_usd: float | None = None,
+    cache_creation_5m_per_million_usd: float | None = None,
+    cache_creation_1h_per_million_usd: float | None = None,
 ) -> CostFn:
     """Build a ``cost_fn`` for Anthropic-shaped responses.
 
@@ -126,14 +165,54 @@ def anthropic_cost(
     across providers — so this factory exists for parameter-naming clarity
     rather than a different extraction path. Anthropic API docs label
     pricing as 'input' / 'output' tokens; OpenAI labels them
-    'prompt' / 'completion'. The kwargs here match Anthropic's naming."""
+    'prompt' / 'completion'. Optional cache-read and cache-creation rates use
+    normalized ``input_token_details``. The 5-minute and 1-hour arguments
+    price Anthropic's cache-write tiers independently. A tier with no explicit
+    rate uses ``cache_creation_per_million_usd`` and then the ordinary input
+    rate as its fallback."""
+
+    _validate_rates(
+        input_per_million_usd=input_per_million_usd,
+        output_per_million_usd=output_per_million_usd,
+        cache_read_per_million_usd=cache_read_per_million_usd,
+        cache_creation_per_million_usd=cache_creation_per_million_usd,
+        cache_creation_5m_per_million_usd=cache_creation_5m_per_million_usd,
+        cache_creation_1h_per_million_usd=cache_creation_1h_per_million_usd,
+    )
 
     def _cost_fn(result: Any) -> Amount:
         usage = _extract_usage(result)
         input_tokens = _token_count(usage, "input_tokens")
         output_tokens = _token_count(usage, "output_tokens")
+        cache_read_tokens = _optional_detail_count(usage, "cache_read")
+        cache_creation_tokens = _optional_detail_count(usage, "cache_creation")
+        cache_creation_5m_tokens = _optional_detail_count(usage, "ephemeral_5m_input_tokens")
+        cache_creation_1h_tokens = _optional_detail_count(usage, "ephemeral_1h_input_tokens")
+        tiered_creation_tokens = cache_creation_5m_tokens + cache_creation_1h_tokens
+        if tiered_creation_tokens > cache_creation_tokens:
+            raise ValueError("cache-creation tier counts cannot exceed cache_creation tokens.")
+        standard_input_tokens = input_tokens - cache_read_tokens - cache_creation_tokens
+        if standard_input_tokens < 0:
+            raise ValueError("cache token counts cannot exceed total input_tokens.")
+        cache_read_rate = cache_read_per_million_usd
+        if cache_read_rate is None:
+            cache_read_rate = input_per_million_usd
+        cache_creation_rate = cache_creation_per_million_usd
+        if cache_creation_rate is None:
+            cache_creation_rate = input_per_million_usd
+        cache_creation_5m_rate = cache_creation_5m_per_million_usd
+        if cache_creation_5m_rate is None:
+            cache_creation_5m_rate = cache_creation_rate
+        cache_creation_1h_rate = cache_creation_1h_per_million_usd
+        if cache_creation_1h_rate is None:
+            cache_creation_1h_rate = cache_creation_rate
+        unclassified_creation_tokens = cache_creation_tokens - tiered_creation_tokens
         usd = (
-            input_tokens * input_per_million_usd
+            standard_input_tokens * input_per_million_usd
+            + cache_read_tokens * cache_read_rate
+            + unclassified_creation_tokens * cache_creation_rate
+            + cache_creation_5m_tokens * cache_creation_5m_rate
+            + cache_creation_1h_tokens * cache_creation_1h_rate
             + output_tokens * output_per_million_usd
         ) / 1_000_000
         microcents = int(round(usd * _USD_TO_MICROCENTS))
