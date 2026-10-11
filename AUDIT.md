@@ -1,5 +1,9 @@
 # langchain-runcycles — Middleware and Recovery Audit
 
+## 2026-10-11 — Dependency maintenance
+
+PR #58 updates the SHA-pinned upload-artifact action from 7.0.1 to 7.0.2 in publishing and Scorecard workflows. Middleware source, Python dependencies, and protocol behavior are unchanged. The existing Python 3.10–3.14 lint, typing, build, and coverage checks remain enabled and must pass before merge.
+
 **Date:** 2026-08-06
 **Package:** `langchain-runcycles` v0.4.0
 **LangChain target:** `langchain >=1.0,<2.0`, `langchain-core >=1.0,<2.0`
