@@ -1,5 +1,15 @@
 # langchain-runcycles — Middleware and Recovery Audit
 
+## 2026-10-19 — Dependabot dependency review
+
+Consolidates the following reviewed updates on current main:
+
+- PR #60: chore(deps): bump ossf/scorecard-action from 2.4.4 to 2.5.0
+- PR #61: chore(deps): bump github/codeql-action/upload-sarif from 4.38.3 to 4.39.0
+
+Workflow actions remain pinned to verified upstream commit SHAs. Existing supported runtime versions, application code, and YAML protocol contracts are preserved. Existing lint, build, test, coverage, conformance, and applicable security checks must pass on the combined commit before merge; coverage requirements are not lowered.
+
+
 ## 2026-10-11 — Dependency maintenance
 
 PR #58 updates the SHA-pinned upload-artifact action from 7.0.1 to 7.0.2 in publishing and Scorecard workflows. Middleware source, Python dependencies, and protocol behavior are unchanged. The existing Python 3.10–3.14 lint, typing, build, and coverage checks remain enabled and must pass before merge.
